@@ -1,0 +1,47 @@
+# agentdev image - a hardened, non-root environment with the Claude Code CLI.
+# Built fresh for agentdev (no dependency on localdev's image).
+#
+#   podman build -t ghcr.io/gherlein/agentdev:latest -f image/Containerfile image/
+#
+# The ARG lets a build pin a specific CLI version; the launcher records whatever
+# actually resolves into each profile's agentdev.lock.
+FROM debian:bookworm-slim
+
+ARG CLAUDE_CODE_VERSION=latest
+ARG NODE_MAJOR=22
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    NODE_MAJOR=${NODE_MAJOR}
+
+# Base system: git, build basics, TLS, ssh client, gosu for the UID remap, sudo
+# for the non-root entrypoint branch, and curl/ca-certificates for the Node setup.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl git gnupg gosu sudo openssh-client \
+        build-essential python3 python3-tomli less jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node LTS from NodeSource.
+RUN curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# The Claude Code CLI, pinned by build arg.
+RUN if [ "$CLAUDE_CODE_VERSION" = "latest" ]; then \
+        npm install -g @anthropic-ai/claude-code; \
+    else \
+        npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"; \
+    fi \
+    && npm cache clean --force
+
+# Non-root user matching the default host UID; the entrypoint remaps as needed.
+RUN groupadd -g 1000 developer \
+    && useradd -m -u 1000 -g 1000 -s /bin/bash developer \
+    && echo "developer ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/agentdev \
+    && chmod 0440 /etc/sudoers.d/agentdev
+
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+WORKDIR /home/developer
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["bash"]

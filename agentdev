@@ -1,0 +1,265 @@
+#!/bin/bash
+# agentdev - run a coding agent (Phase 1: Claude Code) in an isolated container whose
+# entire "self" is a single, swappable, git-backed profile folder on the host.
+#
+# See VISION.md and DESIGN.md. This launcher owns arg parsing and the podman
+# invocation; lib/*.sh hold config, mounts, seeding, profiles, memory, and metadata.
+set -euo pipefail
+
+SELFDIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+LIBDIR="$SELFDIR/lib"
+
+for m in config mounts meta seed memory profile; do
+  # shellcheck source=/dev/null
+  source "$LIBDIR/$m.sh"
+done
+
+DIR_NAME="$(basename "$PWD")"
+
+usage() {
+  cat <<'EOF'
+Usage: agentdev [MODE] [OPTIONS] [MOUNT-ARGS...] [-- COMMAND...]
+
+Modes (default from config; built-in default: --clean):
+  --clean               fresh throwaway profile, discarded on exit
+  --remember [store]    clean home + a persistent memory store (default: "default")
+  --profile <name>      a persistent named profile under profiles_root
+
+Options:
+  --template <path>     override the seed template for this run
+  --trust <mode>        skip-permissions | workspace-only | prompt
+  --keep                clean mode: keep the profile and print its path
+  --reseed              re-apply template config over an existing profile
+  --dry-run             print the settled plan and the podman command; do not launch
+  -ro <path> / -rw <path> / <dir> / /dev/*   extra mounts
+
+Subcommands:
+  profiles  ls|show|new|rm|fork|snapshot|gc
+  memory    ls|new|rm|diff|log|revert
+  diff      [profile]           show a run's footprint vs. its seed
+  doctor                        check the environment
+  init                          write a starter .agentdev-mounts.toml
+  build                         build the agentdev image locally
+EOF
+}
+
+# --- doctor -----------------------------------------------------------------
+cmd_doctor() {
+  load_config
+  local ok=0
+  check() { if eval "$2" >/dev/null 2>&1; then echo "  ok    $1"; else echo "  FAIL  $1"; ok=1; fi; }
+  echo "agentdev doctor:"
+  check "podman present"            "command -v podman"
+  check "git present"               "command -v git"
+  check "python3 + tomllib"         "python3 -c 'import tomllib'"
+  check "image present ($IMAGE)"    "podman image exists '$IMAGE'"
+  check "template readable ($TEMPLATE_SOURCE)" "test -d '$TEMPLATE_SOURCE'"
+  if [[ "$AUTH_MODE" == "api-key-env" ]]; then
+    check "ANTHROPIC_API_KEY set (api-key-env)" "test -n \"\${ANTHROPIC_API_KEY:-}\""
+  fi
+  if lint_template "$TEMPLATE_SOURCE" 2>/dev/null; then echo "  ok    template lints clean"; else echo "  FAIL  template lint"; ok=1; fi
+  case "$IMAGE" in *@sha256:*) echo "  ok    image pinned by digest" ;; *) echo "  warn  image is a tag, not a digest (not reproducible)" ;; esac
+  return $ok
+}
+
+# --- build ------------------------------------------------------------------
+cmd_build() {
+  load_config
+  local tag="${1:-$IMAGE}"
+  case "$tag" in *@sha256:*) tag="ghcr.io/gherlein/agentdev:latest" ;; esac
+  echo "Building $tag from $SELFDIR/image/Containerfile ..." >&2
+  podman build -t "$tag" -f "$SELFDIR/image/Containerfile" "$SELFDIR/image"
+}
+
+# --- launch -----------------------------------------------------------------
+launch() {
+  # MODE, KEEP, cleanup, PROFILE, RUN_ID, MEMORY_STORE, MOUNTS_TMPFILE are global on
+  # purpose: the EXIT trap reads them after this function has already returned.
+  local MEMORY_NAME="default" TEMPLATE_OVERRIDE="" TRUST_OVERRIDE=""
+  local RESEED=no DRY_RUN=no
+  local MOUNT_ARGS=() COMMAND=()
+  MODE=""; KEEP=no
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --clean)    MODE=clean ;;
+      --remember)
+        MODE=remember
+        if [[ -n "${2:-}" && "$2" != -* && "$2" != /dev/* && ! -d "$2" ]]; then
+          MEMORY_NAME="$2"; shift
+        fi ;;
+      --profile)  MODE=profile; MEMORY_NAME=""; PROFILE_NAME="${2:?--profile needs a name}"; shift ;;
+      --template) TEMPLATE_OVERRIDE="${2:?--template needs a path}"; shift ;;
+      --trust)    TRUST_OVERRIDE="${2:?--trust needs a mode}"; shift ;;
+      --keep)     KEEP=yes ;;
+      --reseed)   RESEED=yes ;;
+      --dry-run)  DRY_RUN=yes ;;
+      -ro|-rw)    MOUNT_ARGS+=("$1" "${2:?$1 needs a path}"); shift ;;
+      /dev/*)     MOUNT_ARGS+=("$1") ;;
+      --)         shift; COMMAND=("$@"); break ;;
+      -h|--help)  usage; exit 0 ;;
+      -*)         echo "Error: unknown flag '$1'" >&2; usage >&2; exit 1 ;;
+      *)
+        if [[ -d "$1" ]]; then MOUNT_ARGS+=("$1");
+        else echo "Error: unknown argument '$1' (not a directory)" >&2; exit 1; fi ;;
+    esac
+    shift
+  done
+
+  # The workspace mounts at /<DIR_NAME>; refuse names that would shadow a critical
+  # container path (and nest the profile mount inside the workspace).
+  case " home root etc usr bin sbin lib lib64 dev proc sys var tmp opt mnt run srv boot " in
+    *" $DIR_NAME "*)
+      echo "Error: launch directory basename '$DIR_NAME' collides with a system path" >&2
+      echo "       (workspace would mount at /$DIR_NAME). Rename or launch from elsewhere." >&2
+      exit 1 ;;
+  esac
+
+  load_config
+  MODE="${MODE:-$DEFAULT_MODE}"
+  [[ -n "$TEMPLATE_OVERRIDE" ]] && TEMPLATE_SOURCE="$(expand_tilde "$TEMPLATE_OVERRIDE")"
+  [[ -n "$TRUST_OVERRIDE" ]] && WS_TRUST="$TRUST_OVERRIDE"
+
+  if [[ "$AUTH_MODE" == "api-key-env" && -z "${ANTHROPIC_API_KEY:-}" ]]; then
+    echo "Error: auth.mode=api-key-env but ANTHROPIC_API_KEY is unset." >&2
+    echo "       Export it, or set auth.mode=interactive for a named profile." >&2
+    exit 1
+  fi
+
+  RUN_ID="$(new_run_id)"
+  compute_enc "$DIR_NAME"
+
+  # Resolve the profile path and decide whether to seed. Disk-mutating steps are
+  # guarded so --dry-run is side-effect-free.
+  local do_seed=no reseed_arg=""; cleanup=no
+  MEMORY_STORE_JSON="null"
+  case "$MODE" in
+    clean)
+      PROFILE="$CLEAN_ROOT/$RUN_ID"; do_seed=yes
+      [[ "$KEEP" == yes ]] || cleanup=yes ;;
+    remember)
+      PROFILE="$CLEAN_ROOT/$RUN_ID"; do_seed=yes; cleanup=yes
+      MEMORY_STORE="$MEMORY_ROOT/$MEMORY_NAME"
+      MEMORY_STORE_JSON="\"$MEMORY_STORE\""
+      [[ "$DRY_RUN" == yes ]] || resolve_memory_store "$MEMORY_NAME" ;;
+    profile)
+      PROFILE="$PROFILES_ROOT/$PROFILE_NAME"
+      [[ "$DRY_RUN" == yes ]] || lock_profile "$PROFILE"
+      if [[ ! -f "$PROFILE/agentdev.meta.json" ]]; then do_seed=yes
+      elif [[ "$RESEED" == yes ]]; then reseed_arg=reseed; fi ;;
+    *) echo "Error: unknown mode '$MODE'" >&2; exit 1 ;;
+  esac
+
+  if [[ "$DRY_RUN" != yes ]]; then
+    if [[ "$do_seed" == yes ]]; then
+      seed_profile; write_meta; git_init_profile
+    elif [[ "$reseed_arg" == reseed ]]; then
+      seed_profile reseed
+    fi
+    # Ensure the memory mount point exists in the profile for remember mode.
+    [[ "$MODE" == remember ]] && mkdir -p "$PROFILE/.claude/projects/$ENC/memory"
+  fi
+
+  # Collect external mounts (ours), then the host CA passthrough.
+  collect_mounts "agentdev" "$DIR_NAME" "${MOUNT_ARGS[@]}"
+  collect_host_ca_mount
+
+  # The profile mount - the whole point: the agent's home is this folder, not yours.
+  local PROFILE_MOUNT=(
+    "-v" "$PROFILE/.claude:/home/developer/.claude:rw"
+    "-v" "$PROFILE/.claude.json:/home/developer/.claude.json:rw"
+  )
+  if [[ "$MODE" == remember ]]; then
+    local mem_target="/home/developer/.claude/projects/$ENC/memory"
+    register_target "$mem_target" "memory store $MEMORY_STORE"
+    PROFILE_MOUNT+=("-v" "$MEMORY_STORE:$mem_target:rw")
+  fi
+
+  if [[ "$DRY_RUN" != yes ]]; then
+    # Reproducibility pin now that the mount set is known.
+    write_lock
+    [[ "$do_seed" == yes && -d "$PROFILE/.git" ]] && snapshot_profile "seed + lock"
+  fi
+
+  # Host passthroughs (SSH keys/agent, api key, userns, workspace).
+  local SSH_MOUNT=() SSH_AGENT=() API_ENV=() USERNS=() USB=()
+  [[ -d "$HOME/.ssh" ]] && SSH_MOUNT=("-v" "$HOME/.ssh:/home/developer/.ssh:ro")
+  if [[ -n "${SSH_AUTH_SOCK:-}" && -S "${SSH_AUTH_SOCK:-}" ]]; then
+    SSH_AGENT=("-v" "$SSH_AUTH_SOCK:/ssh-agent" "-e" "SSH_AUTH_SOCK=/ssh-agent")
+  fi
+  [[ -n "${ANTHROPIC_API_KEY:-}" ]] && API_ENV=("-e" "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
+  [[ "$(uname -s)" == "Linux" ]] && USERNS=("--userns=keep-id")
+  [[ -d /dev/bus/usb ]] && USB=("--device" "/dev/bus/usb")
+
+  MOUNTS_TMPFILE="$(mktemp)"
+  printf "%b" "$MOUNTS_CONTENT" > "$MOUNTS_TMPFILE"
+
+  # Interactive only when attached to a terminal; keeps `-- command` automation clean.
+  local TTY=(-i); [[ -t 0 && -t 1 ]] && TTY=(-i -t)
+
+  local PODMAN_ARGS=(
+    run --rm "${TTY[@]}"
+    "${USERNS[@]}" "${USB[@]}" "${DEVICE_MOUNTS[@]}"
+    -v "$PWD:/$DIR_NAME"
+    "${PROFILE_MOUNT[@]}"
+    "${SSH_MOUNT[@]}" "${SSH_AGENT[@]}"
+    "${CA_CERT_MOUNT[@]}"
+    "${VOLUME_MOUNTS[@]}"
+    "${API_ENV[@]}" "${CA_CERT_ENV[@]}"
+    -v "$MOUNTS_TMPFILE:/home/developer/mounts:ro"
+    -e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)"
+    -e "HOST_HOME=$HOME" -e "HOST_USER=$(id -un)"
+    -e "WORKSPACE=/$DIR_NAME"
+    -w "/$DIR_NAME"
+    "$IMAGE"
+  )
+  if [[ ${#COMMAND[@]} -gt 0 ]]; then PODMAN_ARGS+=("${COMMAND[@]}"); else PODMAN_ARGS+=(bash); fi
+
+  if [[ "$DRY_RUN" == yes ]]; then
+    echo "# agentdev --dry-run"
+    echo "mode:          $MODE"
+    echo "profile:       $PROFILE"
+    echo "template:      $TEMPLATE_SOURCE"
+    echo "workspace:     $PWD -> /$DIR_NAME   (enc: $ENC)"
+    echo "trust:         $WS_TRUST    auth: $AUTH_MODE"
+    [[ "$MODE" == remember ]] && echo "memory store:  $MEMORY_STORE"
+    echo "cleanup:       $cleanup"
+    echo
+    echo "# podman command:"
+    printf 'podman'; printf ' %q' "${PODMAN_ARGS[@]}"; echo
+    rm -f "$MOUNTS_TMPFILE"
+    return 0
+  fi
+
+  # Run; on any exit (normal, error, or signal), snapshot and/or clean up. The vars
+  # this reads are global, so it is correct even after launch() has returned, and
+  # every reference is set -u-safe.
+  cleanup_run() {
+    rm -f "${MOUNTS_TMPFILE:-}"
+    [[ "${MODE:-}" == remember ]] && snapshot_memory "memory update (${RUN_ID:-})"
+    if [[ "${cleanup:-}" == yes ]]; then
+      [[ -n "${PROFILE:-}" ]] && rm -rf "$PROFILE"
+    elif [[ -n "${PROFILE:-}" ]]; then
+      snapshot_profile "run ${RUN_ID:-}"
+      [[ "${KEEP:-}" == yes ]] && echo "Kept profile: $PROFILE" >&2
+    fi
+  }
+  trap cleanup_run EXIT
+
+  podman "${PODMAN_ARGS[@]}"
+}
+
+main() {
+  case "${1:-}" in
+    ""|-h|--help|help) usage; [[ "${1:-}" == "" ]] && exit 1 || exit 0 ;;
+    profiles) shift; load_config; cmd_profiles "$@" ;;
+    memory)   shift; load_config; cmd_memory "$@" ;;
+    diff)     shift; load_config; cmd_diff "$@" ;;
+    doctor)   cmd_doctor ;;
+    build)    shift; cmd_build "$@" ;;
+    init)     load_config; handle_init_flag ;;
+    *)        launch "$@" ;;
+  esac
+}
+
+main "$@"

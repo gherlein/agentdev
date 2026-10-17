@@ -47,10 +47,13 @@ exactly wrong for several things we increasingly want:
   *template* and pin the exact image and CLI build, so two runs start identically and
   any divergence lives entirely in a captured, diffable profile.
 
-`agentdev` keeps everything good about localdev — the hardened image, the non-root
+`agentdev` is **built fresh and stands alone** — it ships its own container image, its own
+entrypoint, and its own mount logic, with no dependency on localdev's code, image, or
+launchers. It adopts the hardening localdev proved out — a hardened image, a non-root
 user, `--userns=keep-id` ownership mapping, external mounts, TLS trust passthrough, SSH
-agent forwarding — and changes **one thing at the core**: the agent's home is no longer
-your host `~/.claude`. It is a **profile folder** that `agentdev` creates fresh,
+agent forwarding — and **implements all of it itself**, while changing **one thing at the
+core**: the agent's home is no longer your host `~/.claude`. It is a **profile folder**
+that `agentdev` creates fresh,
 re-uses by name, or layers memory into — and, as options, it can wrap the workspace and
 the network in isolation too.
 
@@ -259,7 +262,7 @@ transcript starts empty. Properties worth calling out:
 ## 8. Authentication and trust in an isolated home
 
 - **Clean / remember modes → API key env (`auth.mode = "api-key-env"`).** Forward
-  `ANTHROPIC_API_KEY` (as localdev already does) and seed **no** `.credentials.json`.
+  `ANTHROPIC_API_KEY` into the container and seed **no** `.credentials.json`.
   Nothing secret is written to a folder that might be kept.
 - **Named mode → may inherit credentials (`inherit-credentials`), opt-in.** A named
   profile can hold its own `.credentials.json` (e.g. from an interactive login on first
@@ -297,8 +300,8 @@ code and home are both safe." Combined with §10 it closes the remaining escape 
 
 ## 10. Network & egress isolation
 
-localdev offers isolated vs. host networking. agentdev adds a third, tighter tier for
-clean rooms and untrusted tasks:
+agentdev offers isolated vs. host networking, plus a third, tighter tier for clean rooms
+and untrusted tasks:
 
 - **`--net=allowlist`** — only an allowlist of destinations is reachable
   (`api.anthropic.com`, configured package registries, declared git remotes), via a
@@ -308,8 +311,8 @@ clean rooms and untrusted tasks:
   can show the network footprint alongside the filesystem one. An auditable answer to
   "where did this agent talk to?"
 
-Default remains localdev's behavior; the allowlist is opt-in, and the natural companion
-to `--clean --patch-only` for "run this prompt I don't fully trust."
+Default remains standard isolated/host networking; the allowlist is opt-in, and the
+natural companion to `--clean --patch-only` for "run this prompt I don't fully trust."
 
 ---
 
@@ -371,9 +374,9 @@ runtime (profile/memory) folders are created and mounted**.
 3. **User config** — `~/.agentdev/config.toml`.
 4. **Built-in defaults.**
 
-External mounts (`[mounts.*]`, `-ro`/`-rw` args, env var) combine as a **union**,
-reusing localdev's mount collector and its `source = destination` / `&`-mirror grammar
-and collision checks. The **profile**, **memory store**, and **template** each resolve to
+External mounts (`[mounts.*]`, `-ro`/`-rw` args, env var) combine as a **union** via
+agentdev's own mount collector, with a `source = destination` / `&`-mirror grammar and
+collision checks. The **profile**, **memory store**, and **template** each resolve to
 exactly one authoritative value — one agent home per run.
 
 ### Example
@@ -383,7 +386,7 @@ exactly one authoritative value — one agent home per run.
 
 [agent]
 name  = "claude"
-image = "ghcr.io/gherlein/localdev@sha256:…"     # pin by digest for reproducibility
+image = "ghcr.io/gherlein/agentdev@sha256:…"     # agentdev's own image, pinned by digest
 
 [profile]
 profiles_root = "~/.agentdev/profiles"
@@ -425,18 +428,21 @@ authoritative config/template aborts before the container starts** (fail-closed)
 
 ---
 
-## 13. What carries over unchanged from localdev
+## 13. Patterns adopted (built fresh, not inherited)
 
-`agentdev` is a reframing of localdev's launcher, not a rewrite. It inherits the
-hardened image, non-root `developer` user and `--userns=keep-id` ownership remapping, the
-external-mount union (CLI + env + file, with collision detection and `&`), SSH agent
-forwarding, host TLS trust-anchor passthrough, optional USB passthrough, the host-network
-variant, the DigitalOcean/remote story, and the entrypoint's host-home symlink trick
-(which already lets an absolute `$HOME` resolve inside the container — directly reusable
-for mounting a profile at the host home path).
+`agentdev` is a **new, self-contained** tool. It owns its own container image, entrypoint,
+mount library, and launcher, and depends on localdev for nothing at build or run time.
+What it *adopts* — as proven patterns it re-implements — are: a hardened image with a
+non-root `developer` user and `--userns=keep-id` ownership remapping, an external-mount
+union (CLI + env + file, with collision detection and `&`), SSH agent forwarding, host TLS
+trust-anchor passthrough, optional USB passthrough, a host-network variant, the
+remote-podman story, and the entrypoint's **host-home symlink** (which lets an absolute
+`$HOME` resolve inside the container — the mechanism that makes mounting a profile at the
+host home path work). Every one of these lives in agentdev's own code.
 
-The **inversions**: where localdev mounts `$HOME/.claude → ~/.claude (rw)` and
-`$HOME/.claude.json`, agentdev mounts `<profile>/.claude` and `<profile>/.claude.json`
+The **core choice**: where localdev mounts `$HOME/.claude → ~/.claude (rw)` and
+`$HOME/.claude.json` (the agent "is you"), agentdev mounts `<profile>/.claude` and
+`<profile>/.claude.json`
 and **never** touches the host's real ones; and it adds the optional workspace (§9) and
 network (§10) isolation tiers on top.
 
@@ -465,8 +471,8 @@ network (§10) isolation tiers on top.
   egress logging.
 - F12. Management + introspection: `profiles`, `memory`, `diff`, `report`, `doctor`,
   `--dry-run`.
-- F13. Preserve localdev's external-mount union, SSH forwarding, TLS passthrough, and
-  ownership mapping.
+- F13. Provide (in agentdev's own image and launcher) an external-mount union, SSH
+  forwarding, TLS passthrough, and UID/GID ownership mapping.
 
 ### Non-functional
 - N1. **Isolation:** a clean run is provably free of prior history/memory/credentials and
@@ -488,7 +494,7 @@ network (§10) isolation tiers on top.
 - Not multi-agent on day one (Claude Code first; §16).
 - Not a secrets manager; it forwards an env key and optionally lets a named profile hold
   its own login, nothing fancier.
-- Not cloud orchestration, though the localdev remote notes apply directly.
+- Not cloud orchestration, though the same remote-podman approach applies directly.
 
 ---
 
@@ -508,21 +514,25 @@ network (§10) isolation tiers on top.
    podman; how to inject the proxy's CA without weakening the clean-room guarantee.
 6. **cow/patch-only implementation** — overlayfs vs. `git worktree` clone vs. rsync-back;
    how to present the resulting diff for review.
-7. **Relationship to localdev** — ship `agentdev` as a sibling launcher in the localdev
-   repo reusing `localdev-mounts.sh` (leaning), or its own repo depending on the image?
+7. **Image build & Claude Code pinning** (now that agentdev ships its own image) — bake a
+   known-good CLI version into the image, or install at build from a pinned npm tag; how
+   `agentdev doctor`/`build` keep the image digest and CLI version in the lock honest.
+   *(Resolved separately: agentdev is its own repo with its own image, entrypoint, and
+   mount library — it does not depend on localdev.)*
 
 ---
 
 ## 16. Roadmap: Claude first, then the rest
 
-The profile abstraction generalizes cleanly because every agent localdev supports keeps
+The profile abstraction generalizes cleanly because every coding agent we care about keeps
 state in a well-known home dir (`~/.claude`, `~/.opencode`, `~/.pi`, `~/.omp`, `~/.kit`).
 A profile is simply "the home dir(s) for *this* agent."
 
 - **Phase 1 — Claude only, core.** Profile = `.claude/` + `.claude.json`; clean, remember,
   and named modes; git-backed profiles & memory stores; template seeding (`copy`) with
-  linting; API-key auth; `profiles` / `memory` / `diff` / `doctor` / `--dry-run`; reuse
-  of the localdev image and mount lib. Ship this and prove the clean-room guarantees.
+  linting; API-key auth; `profiles` / `memory` / `diff` / `doctor` / `--dry-run`; and
+  agentdev's own image, entrypoint, and mount library. Ship this and prove the clean-room
+  guarantees.
 - **Phase 2 — safety & insight.** `--net=allowlist` + egress logging; `--cow-workspace` /
   `--patch-only`; tmpfs clean rooms; `report` (cost/cache/tools/egress) + `--budget`;
   concurrency lock; `overlay-ro` templates; credential-holding named profiles.
