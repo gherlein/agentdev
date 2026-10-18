@@ -2,7 +2,7 @@
 
 > An isolated, containerized environment for running coding agents where **all of the
 > agent's "self"** — its authored config, its generated history, and its learned memory —
-> lives in a single, swappable, git-backed folder on the host. Run it as a **clean room**
+> lives in a single, swappable folder on the host. Run it as a **clean room**
 > (a brand-new user with no past), as a **remembering agent with clean history** (keeps
 > what it learned, forgets the chatter), or against a **named profile** that carries
 > everything forward. Optionally isolate the *code* too, and lock down the network, so a
@@ -35,9 +35,9 @@ exactly wrong for several things we increasingly want:
 - **A true clean room.** Run a task "as if" the container were a brand-new user on the
   host, with zero history, zero memory, zero prior context — a reproducible one-shot
   environment whose entire footprint is captured in one place.
-- **Isolated, swappable, versioned memory.** Keep the agent's history and memory in a
-  folder I can name, fork, diff, roll back, archive, or throw away — without entangling
-  it with my daily-driver `~/.claude`.
+- **Isolated, swappable memory.** Keep the agent's history and memory in a folder I can
+  name, fork, archive, or throw away — and version myself with git if I want to — without
+  entangling it with my daily-driver `~/.claude`.
 - **Remember without the baggage.** Keep what the agent *learned* across runs while
   starting each session with a clean transcript — no stale context, no compaction
   baggage, lower cost.
@@ -45,7 +45,7 @@ exactly wrong for several things we increasingly want:
   but optionally the *code* it touches and the *network* it can reach.
 - **Reproducibility and auditability.** Seed every run from a known-good config
   *template* and pin the exact image and CLI build, so two runs start identically and
-  any divergence lives entirely in a captured, diffable profile.
+  any divergence lives entirely in one captured profile folder.
 
 `agentdev` is **built fresh and stands alone** — it ships its own container image, its own
 entrypoint, and its own mount logic, with no dependency on localdev's code, image, or
@@ -83,11 +83,12 @@ directory *into* an otherwise-clean profile at exactly the right place.)
 ### The profile
 
 A **profile** is a single host directory that holds a complete, self-contained agent
-home, and it is **a git repository** (see §12 for why that is a feature, not a detail).
-Its layout mirrors the slice of a home directory Claude Code actually uses:
+home. It is a **plain folder** — agentdev never versions it (§11). If you want history,
+put it under git (or anything else) yourself. Its layout mirrors the slice of a home
+directory Claude Code actually uses:
 
 ```
-<profile>/                      ← a git repo: every run can commit, diff, roll back, fork
+<profile>/                      ← a plain folder; agentdev runs no version control on it
 ├── .claude/                    → mounted to ~/.claude inside the container
 │   ├── CLAUDE.md               ┐
 │   ├── settings.json           │  authored config, seeded from the template
@@ -105,8 +106,8 @@ Its layout mirrors the slice of a home directory Claude Code actually uses:
 
 Mounting this profile — instead of the host's real `~/.claude` — is the whole trick.
 The agent gets a complete, believable home that is *this folder and nothing else*, so
-its entire life story is captured in one place we can seed, snapshot, fork, diff, reuse,
-or delete.
+its entire life story is captured in one place we can seed, fork, reuse, or delete — and
+that you are free to version yourself, outside the tool, if you want history.
 
 ---
 
@@ -152,9 +153,9 @@ agentdev --remember research              # a named memory store, shared across 
 # Fully persistent named profile — remembers everything, carries history forward.
 agentdev --profile research
 
-# Clean room, but keep the profile afterward so I can inspect / diff what it did.
+# Clean room, but keep the profile afterward so I can inspect what it did (and version
+# it myself if I want — agentdev leaves that to me).
 agentdev --clean --keep
-agentdev diff                             # what did that run change vs. the seed?
 
 # Branch a profile's memory, try a risky approach, keep or discard it.
 agentdev profiles fork research experiment
@@ -210,9 +211,9 @@ Two strategies, chosen per `[template].strategy`:
 
 - **`copy` (default).** At profile creation, copy the template's `include` list into
   `<profile>/.claude/`, create empty runtime scaffolding (`projects/`, `history.jsonl`,
-  a minimal valid `.claude.json`), `git init` + initial commit, and let everything be
-  writable thereafter. The profile is a real, self-contained, versioned home you can
-  `tar`, move, or push to a remote.
+  a minimal valid `.claude.json`), and let everything be writable thereafter. The profile
+  is a real, self-contained home you can `tar`, move, or (if you put it under git
+  yourself) push to a remote.
 - **`overlay-ro` (later).** Mount the template read-only and layer a writable upper dir
   (overlayfs, or `:ro` template + `:rw` runtime subdirs) so the authored baseline is
   physically immutable and *only* generated state lives in the writable layer. Enforces
@@ -245,14 +246,15 @@ for the launch directory, plus any global memory convention — agentdev can:
 The result: the agent writes and reads real, durable memory, but every session's
 transcript starts empty. Properties worth calling out:
 
-- **A memory store is its own named, portable, git-backed thing** (`memory_root/<name>`),
+- **A memory store is its own named, portable folder** (`memory_root/<name>`),
   independent of any one profile — so memory can be shared across repos and across
-  modes.
+  modes. It is a plain folder; agentdev does not version it.
 - **Read-only team memory.** A store can be mounted read-only (e.g. cloned from a team
   git repo) so the agent *reads* shared knowledge but writes personal memory into a
   separate writable store layered on top.
-- **Memory is diffable and revertible** (it is git): `agentdev memory diff` /
-  `memory log` / `memory revert` answer "what did the agent learn, and can I undo that?"
+- **History is yours to keep.** If you want "what did the agent learn, and can I undo
+  that?", put the store under git yourself — then ordinary `git diff` / `git log` /
+  `git revert` answer it. agentdev deliberately wraps none of this.
 - **Clean rooms stay clean.** `--clean` without `--remember` mounts *no* memory layer;
   `--clean --remember <store>` is precisely "amnesiac about conversations, but keeps
   what it learned."
@@ -261,16 +263,19 @@ transcript starts empty. Properties worth calling out:
 
 ## 8. Authentication and trust in an isolated home
 
-- **Clean / remember modes → API key env (`auth.mode = "api-key-env"`).** Forward
-  `ANTHROPIC_API_KEY` into the container and seed **no** `.credentials.json`.
-  Nothing secret is written to a folder that might be kept.
-- **Named mode → may inherit credentials (`inherit-credentials`), opt-in.** A named
-  profile can hold its own `.credentials.json` (e.g. from an interactive login on first
-  run) so it needn't be handed the env var each time. Trade-off: a secret now lives in
-  that folder — treat the whole profile as sensitive (`chmod 700`), and note that a
-  credentialed profile must never be pushed to a shared git remote.
-- **Interactive (`interactive`).** Forward nothing; log in inside the container on first
-  launch. Good for a long-lived named profile on a remote box.
+- **`auto` (default) → detect what the host uses and do that.** At launch agentdev
+  resolves: an `ANTHROPIC_API_KEY` in the environment → API-key env; else a **named
+  profile** with a readable host subscription login → inherit it; else interactive login.
+  So `agentdev --profile me` "just works" with whatever you already use on this machine.
+- **API key env (`api-key-env`).** Forward `ANTHROPIC_API_KEY` into the container and seed
+  **no** `.credentials.json`. Nothing secret is written to a folder that might be kept.
+- **Inherit credentials (`inherit-credentials`), named profiles only.** Copy the host's
+  subscription `~/.claude/.credentials.json` into the profile once (mode `600`, gitignored)
+  so a Claude Pro/Max login carries in without an env var. The secret now lives in that
+  folder — treat the whole profile as sensitive (`chmod 700`); never push it to a shared
+  remote. Refused for clean/remember: a secret is never copied into a throwaway home.
+- **Interactive (`interactive`).** Forward nothing; log in inside the container
+  (`--login` is the shorthand). Lasting for a named profile, ephemeral for clean/remember.
 
 **Trust-dialog friction.** A fresh `.claude.json` leaves per-project
 `hasTrustDialogAccepted` unset, so a clean room would prompt to trust the workspace.
@@ -316,32 +321,35 @@ natural companion to `--clean --patch-only` for "run this prompt I don't fully t
 
 ---
 
-## 11. Git-backed profiles, reproducibility, and lifecycle
+## 11. Folder lifecycle and reproducibility
 
-Because a profile (and a memory store) is a git repo, most management features come for
-free and battle-tested:
+Profiles and memory stores are **plain folders**. agentdev manages their *lifecycle* but
+never their *history* — it runs no version-control commands. The lifecycle features all
+work on ordinary directories:
 
-- **Snapshot** — commit after each run (auto or on demand); every session is a revision.
-- **Roll back** — `git reset` recovers from a session that corrupted memory or config.
-- **Diff** — `agentdev diff` / `memory diff` shows a run's exact footprint against the
-  seed or the previous run; the delta *is* the audit.
 - **Fork** — `agentdev profiles fork <src> <dst>` branches memory/config to try
-  something risky, then keep or throw it away.
-- **Sync** — push a profile (minus secrets) to a remote to move it between machines;
-  transcripts and runtime state are portable the same way.
+  something risky, then keep or throw it away (a plain folder copy).
+- **Archive / move** — `tar` or copy a profile to move it between machines; transcripts
+  and runtime state travel with it.
+- **Discard / gc** — clean rooms are removed on exit; `gc` sweeps crash leftovers.
+
+**Versioning is deliberately out of scope — and left to you.** If you want snapshots,
+roll-back, diffs, or a remote, put the folder under git (or anything else) yourself; it is
+just a directory. agentdev's one concession is a seeded `.gitignore` so that, should you do
+so, credentials are never committed. We may revisit a lighter built-in provenance log later,
+but it will not be git, and it will not be mandatory.
 
 **Reproducibility means pinning the environment, not just the config.** Claude Code's
 on-disk fields are version-skewed — a profile written by one CLI build may
 not replay on another. So `agentdev.lock` records the **image digest, Claude Code
 version, template hash, and mount set**; `agentdev.meta.json` makes each profile
-self-describing. Replay and "reproduce my bug" are honest only with this.
+self-describing. Replay and "reproduce my bug" are honest only with this — and need no VCS.
 
 Lifecycle and management surface:
 
 ```bash
-agentdev profiles ls|new|rm|show|fork|snapshot|gc   # manage named profiles
-agentdev memory   ls|new|rm|diff|log|revert         # manage memory stores
-agentdev diff                                        # run footprint vs. seed
+agentdev profiles ls|new|rm|show|fork|gc            # manage named profiles (plain folders)
+agentdev memory   ls|new|rm                         # manage memory stores (plain folders)
 agentdev report [<profile>]                          # tokens, cache efficiency, cost, tools, egress
 agentdev doctor                                      # check API key, podman, image, template
 agentdev --dry-run                                   # print the exact mount + seed plan, don't launch
@@ -393,7 +401,6 @@ profiles_root = "~/.agentdev/profiles"
 clean_root    = "~/.cache/agentdev/clean"        # put on tmpfs for zero disk residue
 memory_root   = "~/.agentdev/memory"             # memory stores live here
 default_mode  = "clean"                           # clean | remember | profile
-vcs           = "git"                             # profiles & memory stores are git repos
 
 [template]
 source   = "~/.agentdev/templates/default"       # dir, or git URL, or composable layers
@@ -402,7 +409,7 @@ strategy = "copy"                                 # copy | overlay-ro
 include  = ["CLAUDE.md", "settings.json", "hooks/", "skills/", ".mcp.json", "plugins.toml"]
 
 [auth]
-mode = "api-key-env"                              # api-key-env | inherit-credentials | interactive
+mode = "auto"                                     # auto | api-key-env | inherit-credentials | interactive
 
 [workspace]
 isolation = "mount"                               # mount | cow | patch-only
@@ -465,12 +472,13 @@ network (§10) isolation tiers on top.
   layers), with template linting; `--reseed` to re-apply config only.
 - F8. Forward `ANTHROPIC_API_KEY` for clean/remember; support opt-in per-profile
   credential inheritance and interactive login for named profiles.
-- F9. **Git-backed** profiles and memory stores with snapshot/diff/rollback/fork/sync.
+- F9. **Plain-folder** profiles and memory stores (`fork`, archive, `gc`); no built-in
+  version control — a seeded `.gitignore` is the only concession, so user-run git stays
+  secret-safe.
 - F10. **Workspace isolation** options: `mount` (default), `cow`, `patch-only`.
 - F11. **Network isolation** options: `isolated` (default), `host`, `allowlist` with
   egress logging.
-- F12. Management + introspection: `profiles`, `memory`, `diff`, `report`, `doctor`,
-  `--dry-run`.
+- F12. Management + introspection: `profiles`, `memory`, `report`, `doctor`, `--dry-run`.
 - F13. Provide (in agentdev's own image and launcher) an external-mount union, SSH
   forwarding, TLS passthrough, and UID/GID ownership mapping.
 
@@ -480,8 +488,9 @@ network (§10) isolation tiers on top.
   even for untrusted prompts.
 - N2. **Reproducibility:** same template + pinned image/CLI + same inputs ⇒ same starting
   state; `agentdev.lock` + `agentdev.meta.json` make profiles self-describing.
-- N3. **Portability:** a profile/memory store is a plain git repo that can be archived,
-  diffed, and moved (secrets excluded from any remote).
+- N3. **Portability:** a profile/memory store is a plain folder that can be archived and
+  moved as-is; if you put it under git yourself, the seeded `.gitignore` keeps secrets out
+  of any remote.
 - N4. **Parallel-safe:** concurrent runs use distinct profiles with no shared mutable
   state; a named profile in use is locked against a second concurrent launch.
 - N5. **Fail-closed config:** any error in the authoritative config/template aborts before
@@ -529,10 +538,10 @@ state in a well-known home dir (`~/.claude`, `~/.opencode`, `~/.pi`, `~/.omp`, `
 A profile is simply "the home dir(s) for *this* agent."
 
 - **Phase 1 — Claude only, core.** Profile = `.claude/` + `.claude.json`; clean, remember,
-  and named modes; git-backed profiles & memory stores; template seeding (`copy`) with
-  linting; API-key auth; `profiles` / `memory` / `diff` / `doctor` / `--dry-run`; and
-  agentdev's own image, entrypoint, and mount library. Ship this and prove the clean-room
-  guarantees.
+  and named modes; plain-folder profiles & memory stores (no built-in version control);
+  template seeding (`copy`) with linting; API-key auth; `profiles` / `memory` / `doctor` /
+  `--dry-run`; and agentdev's own image, entrypoint, and mount library. Ship this and prove
+  the clean-room guarantees.
 - **Phase 2 — safety & insight.** `--net=allowlist` + egress logging; `--cow-workspace` /
   `--patch-only`; tmpfs clean rooms; `report` (cost/cache/tools/egress) + `--budget`;
   concurrency lock; `overlay-ro` templates; credential-holding named profiles.
@@ -543,6 +552,6 @@ A profile is simply "the home dir(s) for *this* agent."
   paths and the authored-config `include` list differ.
 
 The north star stays fixed: **the agent's entire self — what it was told, everything it
-remembers, and everything it did — is one versioned folder you control, that you can wipe
-for a clean room, hand back to pick up where it left off, or let it remember what it
-learned while forgetting the chatter.**
+remembers, and everything it did — is one folder you control (version it when and where
+you choose), that you can wipe for a clean room, hand back to pick up where it left off,
+or let it remember what it learned while forgetting the chatter.**

@@ -9,7 +9,7 @@
 #
 # Populates these globals, which the launcher may then override from CLI flags:
 #   AGENT_NAME IMAGE LOCALDEV_UNUSED
-#   PROFILES_ROOT CLEAN_ROOT MEMORY_ROOT DEFAULT_MODE VCS
+#   PROFILES_ROOT CLEAN_ROOT MEMORY_ROOT DEFAULT_MODE
 #   TEMPLATE_SOURCE TEMPLATE_STRATEGY  (TEMPLATE_INCLUDE is an array)
 #   AUTH_MODE WS_ISOLATION WS_TRUST
 #
@@ -67,7 +67,6 @@ load_config() {
   CLEAN_ROOT=$(cfg_scalar "profile.clean_root" "$HOME/.cache/agentdev/clean")
   MEMORY_ROOT=$(cfg_scalar "profile.memory_root" "$HOME/.agentdev/memory")
   DEFAULT_MODE=$(cfg_scalar "profile.default_mode" "clean")
-  VCS=$(cfg_scalar "profile.vcs" "git")
 
   TEMPLATE_SOURCE=$(cfg_scalar "template.source" "$SELFDIR/templates/default")
   TEMPLATE_STRATEGY=$(cfg_scalar "template.strategy" "copy")
@@ -82,7 +81,7 @@ load_config() {
     TEMPLATE_INCLUDE=("CLAUDE.md" "settings.json" "hooks" "skills" ".mcp.json")
   fi
 
-  AUTH_MODE=$(cfg_scalar "auth.mode" "api-key-env")
+  AUTH_MODE=$(cfg_scalar "auth.mode" "auto")
   WS_ISOLATION=$(cfg_scalar "workspace.isolation" "mount")
   WS_TRUST=$(cfg_scalar "workspace.trust" "skip-permissions")
 }

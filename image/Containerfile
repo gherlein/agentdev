@@ -1,47 +1,183 @@
-# agentdev image - a hardened, non-root environment with the Claude Code CLI.
-# Built fresh for agentdev (no dependency on localdev's image).
+# agentdev image — a hardened, non-root environment with the Claude Code CLI, the
+# herdr agent orchestrator, and the full localdev toolset. Built fresh for agentdev
+# (its own entrypoint and identity); no dependency on localdev's image.
 #
 #   podman build -t ghcr.io/gherlein/agentdev:latest -f image/Containerfile image/
 #
-# The ARG lets a build pin a specific CLI version; the launcher records whatever
-# actually resolves into each profile's agentdev.lock.
+# Multi-arch: linux/amd64 and linux/arm64.
 FROM debian:bookworm-slim
 
-ARG CLAUDE_CODE_VERSION=latest
-ARG NODE_MAJOR=22
+LABEL org.opencontainers.image.title="agentdev" \
+      org.opencontainers.image.description="Isolated, profile-backed dev container for Claude Code (and later other agents), with the herdr orchestrator, Node, Go, and the full localdev toolset" \
+      org.opencontainers.image.source="https://github.com/gherlein/agentdev" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.vendor="Greg Herlein" \
+      org.opencontainers.image.authors="Greg Herlein"
 
-ENV DEBIAN_FRONTEND=noninteractive \
-    NODE_MAJOR=${NODE_MAJOR}
-
-# Base system: git, build basics, TLS, ssh client, gosu for the UID remap, sudo
-# for the non-root entrypoint branch, and curl/ca-certificates for the Node setup.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl git gnupg gosu sudo openssh-client \
-        build-essential python3 python3-tomli less jq \
+# --- base packages (parity with localdev) -----------------------------------
+RUN apt-get update && apt-get install -y \
+    sudo curl git unzip build-essential cmake squashfs-tools zip file xxd \
+    ffmpeg qpdf imagemagick libpcap-dev jq gosu python3 python3-pip python3-tomli \
+    tree tmux mg rsync zoxide keychain direnv ca-certificates zstd less openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
-# Node LTS from NodeSource.
-RUN curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
+# pandoc + WeasyPrint runtime deps (markdown -> PDF)
+RUN apt-get update && apt-get install -y \
+    pandoc libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz0b libcairo2 \
+    libgdk-pixbuf-2.0-0 libffi8 shared-mime-info fonts-dejavu fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
-# The Claude Code CLI, pinned by build arg.
-RUN if [ "$CLAUDE_CODE_VERSION" = "latest" ]; then \
-        npm install -g @anthropic-ai/claude-code; \
-    else \
-        npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"; \
-    fi \
-    && npm cache clean --force
+# --- Node.js LTS via nvm (parity with localdev) -----------------------------
+ENV NVM_DIR=/usr/local/nvm
+RUN mkdir -p $NVM_DIR && \
+    curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash && \
+    . $NVM_DIR/nvm.sh && nvm install --lts && nvm alias default node && nvm use default
+ENV NODE_PATH="$NVM_DIR/versions/node"
+SHELL ["/bin/bash", "-c"]
+RUN . $NVM_DIR/nvm.sh && \
+    ln -s "$NVM_DIR/versions/node/$(nvm version default)" "$NVM_DIR/default" && \
+    echo "export PATH=\"$NVM_DIR/default/bin:\$PATH\"" >> /etc/environment
+ENV PATH="$NVM_DIR/default/bin:${PATH}"
 
-# Non-root user matching the default host UID; the entrypoint remaps as needed.
-RUN groupadd -g 1000 developer \
-    && useradd -m -u 1000 -g 1000 -s /bin/bash developer \
-    && echo "developer ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/agentdev \
-    && chmod 0440 /etc/sudoers.d/agentdev
+# --- Podman-in-Podman (rootless) --------------------------------------------
+RUN apt-get update && apt-get install -y podman uidmap fuse-overlayfs slirp4netns && \
+    rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /etc/containers && { \
+      echo '[containers]'; echo 'netns="host"'; echo 'userns="host"'; \
+      echo 'ipcns="host"'; echo 'utsns="host"'; echo 'cgroupns="host"'; \
+      echo 'cgroups="disabled"'; echo 'devices=["/dev/null"]'; \
+      echo '[engine]'; echo 'cgroup_manager="cgroupfs"'; \
+      echo 'events_logger="file"'; echo 'runtime="crun"'; \
+    } > /etc/containers/containers.conf
 
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+# --- GitHub CLI --------------------------------------------------------------
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && \
+    chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list && \
+    apt-get update && apt-get install -y gh && rm -rf /var/lib/apt/lists/*
+
+# --- Go + TinyGo -------------------------------------------------------------
+ARG GO_VERSION=1.25.0
+ARG TARGETARCH
+RUN GOARCH="${TARGETARCH:-$(dpkg --print-architecture)}" && \
+    curl -fsSL https://dl.google.com/go/go${GO_VERSION}.linux-${GOARCH}.tar.gz | \
+    tar --no-same-permissions --no-same-owner -xzC /usr/local
+ENV GOROOT=/usr/local/go
+ENV GOPATH=/home/developer/go
+ENV PATH="${GOROOT}/bin:${GOPATH}/bin:${PATH}"
+
+ARG TINYGO_VERSION=0.40.1
+RUN TINYGO_ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" && \
+    curl -fsSL "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${TINYGO_ARCH}.deb" -o /tmp/tinygo.deb && \
+    dpkg -i /tmp/tinygo.deb && rm /tmp/tinygo.deb
+
+# --- non-root developer user -------------------------------------------------
+RUN (groupadd -g 1000 developer 2>/dev/null || groupmod -n developer "$(getent group 1000 | cut -d: -f1)") && \
+    (useradd -m -u 1000 -g 1000 -s /bin/bash developer 2>/dev/null || \
+     usermod -l developer -d /home/developer -m "$(getent passwd 1000 | cut -d: -f1)" 2>/dev/null || true) && \
+    echo 'developer ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/agentdev && \
+    chmod 0440 /etc/sudoers.d/agentdev
+RUN mkdir -p /home/developer/go/{bin,src,pkg} && chown -R 1000:1000 /home/developer
+
+# --- global npm tooling (parity with localdev) ------------------------------
+RUN . $NVM_DIR/nvm.sh && \
+    NODE_OPTIONS="--max-old-space-size=4096" npm install -g \
+    typescript ts-node pnpm eslint prettier && npm cache clean --force
+
+# --- shell setup: nvm lazy-load, PATH, aliases, agentdev indicator ----------
+RUN { \
+    echo 'export NVM_DIR=/usr/local/nvm'; \
+    echo 'nvm() { unset -f nvm node npm npx; . "$NVM_DIR/nvm.sh"; nvm "$@"; }'; \
+    echo 'node() { unset -f nvm node npm npx; . "$NVM_DIR/nvm.sh"; node "$@"; }'; \
+    echo 'npm() { unset -f nvm node npm npx; . "$NVM_DIR/nvm.sh"; npm "$@"; }'; \
+    echo 'npx() { unset -f nvm node npm npx; . "$NVM_DIR/nvm.sh"; npx "$@"; }'; \
+    echo 'export PATH="$NVM_DIR/default/bin:$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"'; \
+    echo 'alias emacs=mg'; \
+    echo 'alias clauded="claude --dangerously-skip-permissions"'; \
+    echo '[[ -n "$WORKSPACE" && -d "$WORKSPACE" ]] && cd "$WORKSPACE"'; \
+    echo 'export AGENTDEV=1; export container=podman; export debian_chroot=agentdev'; \
+    echo '__agentdev_tag="\[\e[1;36m\][agentdev]\[\e[0m\] "'; \
+    echo 'case "$PS1" in *"[agentdev]"*) ;; *) PS1="${__agentdev_tag}${PS1}";; esac'; \
+    } >> /etc/bash.bashrc
+
+# dotfiles management (used when a dotfiles dir is mounted read-only)
+RUN apt-get update && apt-get install -y stow && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /home/developer
+
+# --- USB + device access -----------------------------------------------------
+RUN apt-get update && apt-get install -y \
+    udev libusb-1.0-0 libusb-1.0-0-dev usbutils && rm -rf /var/lib/apt/lists/*
+
+# --- networking, wireless, and SDR tooling (parity with localdev) -----------
+# Preseed wireshark-common so non-root users cannot capture packets.
+RUN echo 'wireshark-common wireshark-common/install-setuid boolean false' | debconf-set-selections && \
+    apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    nmap tshark avahi-utils iw net-tools iproute2 iperf3 aircrack-ng \
+    gpsd gpsd-clients hackrf libhackrf-dev rtl-sdr librtlsdr-dev \
+    soapysdr-tools soapysdr-module-rtlsdr soapysdr-module-hackrf \
+    libhamlib-utils libhamlib-dev ax25-tools ax25-apps libax25 libpcap-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# --- developer-user tool installs -------------------------------------------
+USER developer
+ENV PATH="/home/developer/.npm-global/bin:/home/developer/.local/bin:${PATH}"
+RUN mkdir -p "$HOME/.npm-global" && npm config set prefix "$HOME/.npm-global"
+
+# Claude Code (native installer)
+RUN curl -fsSL https://claude.ai/install.sh | bash
+
+# herdr — agent orchestrator (tmux-like) used to drive agentdev sessions
+RUN curl -fsSL https://herdr.dev/install.sh | sh && herdr --version
+
+# opencode
+RUN curl -fsSL https://opencode.ai/install | bash
+ENV PATH="/home/developer/.opencode/bin:${PATH}"
+
+# uv (with retry)
+RUN for i in 1 2 3; do curl -LsSf https://astral.sh/uv/install.sh | sh && break || sleep 5; done
+ENV PATH="/home/developer/.local/bin:${PATH}"
+
+# oh-my-pi (omp) agent — prebuilt binary (no bun in this image)
+RUN curl -fsSL https://omp.sh/install | sh -s -- --binary && omp --version
+
+# WeasyPrint as an isolated uv tool (pandoc --pdf-engine=weasyprint)
+RUN /home/developer/.local/bin/uv tool install weasyprint
+
+# Go tooling (parity with localdev)
+RUN go install golang.org/x/tools/cmd/goimports@latest && \
+    go install golang.org/x/tools/gopls@latest && \
+    go install github.com/go-delve/delve/cmd/dlv@latest && \
+    go install github.com/mark3labs/kit/cmd/kit@latest
+
+# golangci-lint (pinned release tarball + checksum verification)
+ARG GOLANGCI_LINT_VERSION=2.12.2
+RUN set -euo pipefail && \
+    ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" && \
+    A="golangci-lint-${GOLANGCI_LINT_VERSION}-linux-${ARCH}" && \
+    SUMS="golangci-lint-${GOLANGCI_LINT_VERSION}-checksums.txt" && \
+    BASE="https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_LINT_VERSION}" && \
+    mkdir -p "$HOME/.local/bin" /tmp/golangci && cd /tmp/golangci && \
+    curl -fsSL -O "${BASE}/${A}.tar.gz" && curl -fsSL -O "${BASE}/${SUMS}" && \
+    grep " ${A}.tar.gz\$" "${SUMS}" | sha256sum -c - && \
+    tar -xzf "${A}.tar.gz" "${A}/golangci-lint" && \
+    install -m 755 "${A}/golangci-lint" "$HOME/.local/bin/" && \
+    cd /home/developer && rm -rf /tmp/golangci && golangci-lint --version
+
+# gofi UniFi utility (single `gofi` binary; module path differs from repo, so
+# clone + build directly rather than `go install`).
+RUN cd /home/developer && \
+    git clone --depth 1 https://github.com/emergingrobotics/gofi gofi-src && \
+    cd gofi-src && \
+    go build -o "${GOPATH}/bin/gofi" ./utilities/gofi && \
+    cd /home/developer && rm -rf gofi-src && go clean -cache
+
+# host-mounted ~/bin last so container tools win over host binaries
+ENV PATH="${PATH}:/home/developer/bin"
+
+# --- entrypoint (agentdev's own: UID remap + host-home symlink + gosu) -------
+USER root
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["bash"]

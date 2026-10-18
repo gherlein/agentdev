@@ -52,7 +52,7 @@ both sides of it.
 
 ## 2. Architecture overview
 
-agentdev is one repo with **no external runtime dependency** beyond `podman`, `git`,
+agentdev is one repo with **no external runtime dependency** beyond `podman` and
 `python3` (for TOML parsing, already a Claude Code prerequisite), and the agentdev image
 it builds and publishes.
 
@@ -61,8 +61,8 @@ agentdev (this repo)
 ├── agentdev                     ← the launcher (bash); the only entry point
 ├── lib/
 │   ├── mounts.sh                ← OUR mount-collection library (union grammar, collisions, CA, SSH)
-│   ├── profile.sh               ← resolve / create / lock / snapshot a profile
-│   ├── seed.sh                  ← template → profile (lint, copy, scaffold, git init)
+│   ├── profile.sh               ← resolve / create / lock / fork / gc a profile (plain folders)
+│   ├── seed.sh                  ← template → profile (lint, copy, scaffold, .claude.json)
 │   ├── memory.sh                ← resolve a memory store; compute the deterministic path
 │   ├── config.sh                ← layered TOML/flag resolution (§5)
 │   └── meta.sh                  ← write & read agentdev.meta.json / agentdev.lock
@@ -76,16 +76,26 @@ agentdev (this repo)
 
 ### 2.1 The image (`image/Containerfile` → `ghcr.io/gherlein/agentdev`)
 
-Authored fresh, not derived from localdev's image. Contents:
+Authored fresh, not derived from localdev's image, but it carries the **full localdev
+toolset** so the agent has everything to work with. Debian slim base, **non-root
+`developer` user** (UID 1000), `NOPASSWD` sudo for the entrypoint's privileged steps, and:
 
-- A current stable base (e.g. Debian slim), **non-root `developer` user** (UID 1000),
-  `NOPASSWD` sudo limited to the CA-rebuild and symlink steps the entrypoint needs.
-- **Node LTS + the Claude Code CLI**, pinned to a known version (recorded in the lock, §6).
-- `git`, `gosu`, `ca-certificates`, `openssh-client`, and a minimal build toolchain.
+- **The Claude Code CLI** (native installer) and **[herdr](https://herdr.dev)**, the agent
+  orchestrator this project is driven through (`herdr.dev/install.sh`).
+- **Node LTS** via nvm + TypeScript / ts-node / pnpm / eslint / prettier.
+- **Go** + **TinyGo** + gopls / goimports / dlv / kit / golangci-lint / gofi, and `uv`.
+- **`gh`**, **podman-in-podman** (rootless), `git`, `gosu`, `ca-certificates`, `stow`,
+  `zoxide`, `direnv`, `tmux`, build toolchain.
+- **pandoc + WeasyPrint**, ffmpeg, imagemagick, qpdf (docs/media).
+- The **networking / wireless / SDR stack**: nmap, tshark, aircrack-ng, hackrf, rtl-sdr,
+  soapysdr, hamlib, ax25, gpsd, usbutils, libpcap.
+- The **`opencode`** and **`omp`** agents (present as tools; agentdev Phase 1 still only
+  *manages profiles for* Claude — see §10).
 - `ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]`, default `CMD ["bash"]`.
 
 The image is pinned **by digest** in config and in every profile's `agentdev.lock`, so a
-run is reproducible regardless of tag movement (VISION N2).
+run is reproducible regardless of tag movement (VISION N2). The Claude Code version the
+installer resolves is captured into the lock at seed time (§6).
 
 ### 2.2 The entrypoint (`image/entrypoint.sh`)
 
@@ -126,7 +136,7 @@ agentdev [flags] [mount-args...] [-- command...]
   ├─ parse flags, resolve config (CLI > ./.agentdev.toml > ~/.agentdev/config.toml > defaults)
   ├─ doctor preflight: ANTHROPIC_API_KEY?, podman?, agentdev image digest present?, template readable?
   ├─ resolve MODE → resolve PROFILE path (clean_root/<run-id> | profiles_root/<name>)
-  ├─ if profile absent OR clean:  seed.sh   (lint template, copy, scaffold, .claude.json, git init)
+  ├─ if profile absent OR clean:  seed.sh   (lint template, copy, scaffold, .claude.json, .gitignore guard)
   ├─ if remember:                 memory.sh (resolve store, compute $ENC, ensure mount point)
   ├─ lock the profile (flock)                        # named mode: refuse 2nd concurrent use
   ├─ source lib/mounts.sh; collect_mounts "agentdev" "$DIR_NAME" "$@"; collect_host_ca_mount
@@ -134,7 +144,7 @@ agentdev [flags] [mount-args...] [-- command...]
   ├─ assemble podman argv (workspace, userns, ssh, ca, api-key, HOST_* env, profile)
   │     --dry-run prints the settled config + seed plan + full mount plan and EXITS here
   ├─ podman run ... ghcr.io/gherlein/agentdev@sha256:…  (bash by default, or trailing -- command)
-  └─ on exit (trap): snapshot (git commit) if kept/named ; rm -rf if clean & !--keep
+  └─ on exit (trap): rm -rf if clean & !--keep ; named/kept folders are left as-is
 ```
 
 ---
@@ -148,9 +158,9 @@ agentdev [flags] [mount-args...] [-- command...]
 | **Entrypoint** | `image/entrypoint.sh` | UID/GID remap, host-home symlink, CA rebuild, gosu exec |
 | **Mount library** | `lib/mounts.sh` | External-mount union, collisions, CA, SSH, `init` |
 | **Config resolver** | `lib/config.sh` | Merge CLI / per-project / user / defaults into one settled config |
-| **Profile manager** | `lib/profile.sh` | Resolve path per mode, create dir, `flock`, git snapshot, `fork`, `gc`, `rm` |
-| **Seeder** | `lib/seed.sh` | Lint template, copy `include`, build runtime scaffold + `.claude.json`, `git init` |
-| **Memory manager** | `lib/memory.sh` | Resolve store under `memory_root`, compute `$ENC`, create mount point, git ops |
+| **Profile manager** | `lib/profile.sh` | Resolve path per mode, create dir, `flock`, `fork`, `gc`, `rm` (plain folders) |
+| **Seeder** | `lib/seed.sh` | Lint template, copy `include`, build runtime scaffold + `.claude.json`, `.gitignore` secrets guard |
+| **Memory manager** | `lib/memory.sh` | Resolve store under `memory_root`, compute `$ENC`, create mount point |
 | **Meta/lock writer** | `lib/meta.sh` | `agentdev.meta.json`, `agentdev.lock` (image digest, CLI ver, template hash) |
 
 The launcher sources the `lib/*.sh` files; shared state is a small set of globals
@@ -178,6 +188,8 @@ agentdev [MODE] [OPTIONS] [MOUNT-ARGS...] [-- COMMAND...]
 | Flag | Effect | Phase |
 |---|---|---|
 | `--template <path>` | Override `[template].source` for this run | 1 |
+| `--auth <mode>` | `auto` \| `api-key-env` \| `interactive` \| `inherit-credentials` (default from config) | 1 |
+| `--login` | Shorthand for `--auth interactive` (Claude Pro/Max subscription login) | 1 |
 | `--keep` | Clean mode: don't delete the profile; print its path | 1 |
 | `--reseed` | Re-apply template **config** over an existing profile; leave memory/history | 1 |
 | `--trust <mode>` | `skip-permissions` \| `workspace-only` \| `prompt` (default from config) | 1 |
@@ -190,9 +202,8 @@ agentdev [MODE] [OPTIONS] [MOUNT-ARGS...] [-- COMMAND...]
 
 | Command | Phase 1 behavior |
 |---|---|
-| `agentdev profiles ls\|show\|new\|rm\|fork\|snapshot\|gc` | Manage `profiles_root`; `gc` sweeps crashed `clean_root` leftovers |
-| `agentdev memory ls\|new\|rm\|diff\|log\|revert` | Manage `memory_root` stores (all git ops) |
-| `agentdev diff` | `git diff` of the last run's profile against its seed commit |
+| `agentdev profiles ls\|show\|new\|rm\|fork\|gc` | Manage `profiles_root`; `gc` sweeps crashed `clean_root` leftovers |
+| `agentdev memory ls\|new\|rm` | Manage `memory_root` stores (plain folders) |
 | `agentdev doctor` | Check API key, podman, image digest, template readability + lint |
 | `agentdev init` | Write a starter `.agentdev-mounts.toml` in the launch directory |
 | `agentdev build` | Build/tag the agentdev image locally from `image/Containerfile` |
@@ -230,7 +241,6 @@ profiles_root = "~/.agentdev/profiles"
 clean_root    = "~/.cache/agentdev/clean"            # tmpfs-friendly (Phase 2)
 memory_root   = "~/.agentdev/memory"
 default_mode  = "clean"                              # clean | remember | profile
-vcs           = "git"
 
 [template]
 source   = "~/.agentdev/templates/default"
@@ -238,7 +248,7 @@ strategy = "copy"                                   # overlay-ro is Phase 2
 include  = ["CLAUDE.md", "settings.json", "hooks/", "skills/", ".mcp.json", "plugins.toml"]
 
 [auth]
-mode = "api-key-env"                                # api-key-env | interactive (inherit: P2)
+mode = "auto"                                       # auto | api-key-env | interactive | inherit-credentials
 
 [workspace]
 isolation = "mount"                                 # cow | patch-only are Phase 2
@@ -254,10 +264,14 @@ trust     = "skip-permissions"                      # skip-permissions | workspa
 
 ## 6. On-disk formats
 
-### Profile layout (a git repo)
+### Profile layout
+
+A profile is a **plain folder** — the agent's whole home. **agentdev never versions it.**
+If you want history, roll-back, or a remote, put the folder under git (or anything else)
+yourself, entirely outside this tool; agentdev runs no version-control commands.
 
 ```
-<profile>/                         ← git repo; seed is the first commit
+<profile>/                         ← a plain folder (agentdev never runs git on it)
 ├── .claude/                       → bind-mounted to /home/developer/.claude (rw)
 │   ├── CLAUDE.md  settings.json   ┐  copied from template [include]
 │   ├── hooks/  skills/  .mcp.json ┘
@@ -267,11 +281,12 @@ trust     = "skip-permissions"                      # skip-permissions | workspa
 ├── .claude.json                   → bind-mounted to /home/developer/.claude.json (rw)
 ├── agentdev.meta.json             → provenance (below)
 ├── agentdev.lock                  → reproducibility pin (below)
-└── .gitignore                     → excludes .credentials.json, policy-limits.json
+└── .gitignore                     → secrets guard; excludes .credentials.json, policy-limits.json
 ```
 
-`.gitignore` **always** excludes secrets so a profile can never push credentials to a
-shared remote (VISION N6).
+The `.gitignore` is the one git-aware courtesy: it is written at seed time purely so that
+**if** you later version the folder yourself, credentials and policy limits can never be
+committed or pushed (VISION N6). It is inert in a folder you never put under git.
 
 ### `agentdev.meta.json`
 
@@ -361,9 +376,10 @@ Mechanism:
    ```
 4. `register_target` guarantees no external `-rw` mount collides with it.
 
-Properties: the store is its own git repo under `memory_root/<name>`, shareable across
-repos; `memory diff|log|revert` are git ops; a store may be mounted `:ro` for read-only
-team memory (Phase 2 layering of a writable store on top). `--clean` *without*
+Properties: the store is its own plain folder under `memory_root/<name>`, shareable across
+repos; agentdev does not version it (put it under git yourself if you want memory history).
+A store may be mounted `:ro` for read-only team memory (Phase 2 layering of a writable store
+on top). `--clean` *without*
 `--remember` mounts **no** memory layer — clean stays clean.
 
 ---
@@ -376,7 +392,6 @@ team memory (Phase 2 layering of a writable store on top). `--clean` *without*
 | Seed? | always | always | only if absent |
 | Memory mount | none | `memory_root/<store>` overlay | in-profile (persists naturally) |
 | Lock | n/a (unique run-id) | n/a | `flock` — refuse 2nd concurrent launch |
-| Snapshot on exit | only if `--keep` | home discarded; store auto-commits | auto-commit |
 | Cleanup on exit | `rm -rf` unless `--keep` | `rm -rf` home; keep store | keep |
 
 **Clean-mode guarantees** (VISION §5) are enforced structurally: a fresh `clean_root`
@@ -389,15 +404,29 @@ crash leaves at most a stale dir that `gc` sweeps.
 
 ## 9. Auth & trust
 
-- **api-key-env (default for clean/remember).** The launcher forwards
-  `ANTHROPIC_API_KEY` into the container (`-e ANTHROPIC_API_KEY=…`) and seeds no
-  `.credentials.json`. `doctor` and preflight fail-closed if the key is unset in these
-  modes.
-- **interactive.** Forward nothing; the user logs in inside the container. Because the
-  profile's `.claude` is bind-mounted `:rw`, the login writes `.credentials.json` **into
-  the profile** — fine for a named profile (treat as sensitive, `chmod 700`, gitignored),
-  never retained for a clean room.
-- **inherit-credentials** — Phase 2.
+**`auto` is the default** — it detects what this host uses natively and just does that,
+resolving at launch to one of the concrete modes below:
+
+1. `ANTHROPIC_API_KEY` set in the environment → **api-key-env**.
+2. else a **named profile** with a readable host `~/.claude/.credentials.json` →
+   **inherit-credentials**.
+3. else → **interactive**.
+
+The resolution is printed (`Auth: auto -> <mode>`). `--auth <mode>` / `--login` force a
+specific mode.
+
+- **api-key-env.** Forward `ANTHROPIC_API_KEY` into the container (`-e ANTHROPIC_API_KEY=…`)
+  and seed no `.credentials.json`; fail-closed if the key is unset.
+- **inherit-credentials** (named profiles only). Copy the host's subscription
+  `~/.claude/.credentials.json` into the profile once, mode `600`, gitignored — so "it just
+  works" with the Claude Pro/Max login you already have. Refused for clean/remember: a
+  secret is never copied into a throwaway home (preserves the clean-room guarantee).
+- **interactive.** Forward nothing; log in inside the container. The profile's `.claude` is
+  bind-mounted `:rw`, so the login writes `.credentials.json` into the profile — lasting for
+  a named profile, ephemeral (discarded) for clean/remember.
+
+The key is only forwarded when the effective mode is `api-key-env`, so a stray
+`ANTHROPIC_API_KEY` never leaks into an inherit/interactive run.
 
 **Trust.** Default `skip-permissions`: when launching `claude`, pass
 `--dangerously-skip-permissions`. `workspace-only` instead pre-seeds trust for exactly the
@@ -415,7 +444,7 @@ Phase-1 cost**:
 - The profile is defined as *"the home dir(s) for this agent"*; for `claude` that's
   `.claude/` + `.claude.json`. Adding an agent is: (a) its `include` list, (b) its home
   path(s), (c) its memory path convention, (d) its auth env var. Nothing in the mount
-  plan, seeding skeleton, git lifecycle, or CLI changes shape.
+  plan, seeding skeleton, folder lifecycle, or CLI changes shape.
 - `PROFILE_MOUNT` is built from a small per-agent table rather than hardcoded, so Phase 3
   swaps `.claude`→`.opencode`/`.pi`/`.omp`/`.kit` without touching the launcher body. The
   image may need per-agent CLIs installed; `[agent].image` lets each agent pin its own.
@@ -429,14 +458,15 @@ concretely, but never behind an interface the next agent would have to break.**
 
 **In:** the self-contained image (`Containerfile` + `entrypoint.sh`) and `agentdev build`;
 our own `lib/mounts.sh` (union grammar, collisions, CA, SSH, `init`); clean / remember /
-named modes; `copy` seeding with linting; git-backed profiles & memory stores (`init` +
-seed commit, snapshot on exit, `diff`/`fork`/`gc`); api-key-env + interactive auth; trust
-seeding; `profiles`/`memory`/`diff`/`doctor`/`init`/`--dry-run`; `flock` concurrency
-guard; `meta.json`/`lock`.
+named modes; `copy` seeding with linting; plain-folder profiles & memory stores (`fork`,
+`gc`, `rm` — no version control; versioning is left entirely to the user, outside the tool);
+a `.gitignore` secrets guard; `auto` auth detection (api-key-env / inherit-credentials /
+interactive); trust seeding; `profiles`/`memory`/`doctor`/`init`/`--dry-run`; `flock`
+concurrency guard; `meta.json`/`lock`.
 
 **Deferred (Phase 2):** `--net=allowlist` + egress logging; `--cow-workspace` /
 `--patch-only`; tmpfs clean rooms; `report` (cost/cache/tools) + `--budget`; `overlay-ro`
-templates; `inherit-credentials`; read-only/layered team memory.
+templates; read-only/layered team memory.
 
 **Deferred (Phase 3):** `--fan-out` fleet/best-of-N; composable template layers;
 multi-agent (`--agent`, generalized home-path table, per-agent image install).
@@ -452,8 +482,9 @@ multi-agent (`--agent`, generalized home-path table, per-agent image install).
    a `doctor` check that warns when the installed CLI's schema has moved. (VISION Q1.)
 3. **`<ENC>` assertion** — compute and assert at launch; decide the failure message when a
    future CLI changes the encoding.
-4. **Snapshot cadence** — auto-commit every run (chosen) vs. on-demand `snapshot` only;
-   how noisy is per-run history for named profiles?
+4. **Folder provenance without version control** — agentdev does not version folders; is
+   `agentdev.meta.json` + `agentdev.lock` enough provenance, or do we want a lightweight
+   append-only run log (not git) for named profiles?
 5. **Launching claude vs. bash** — keep bash default and rely on `-- claude …` for
    automation, or add a `--exec claude` convenience with trust flags wired in automatically?
 6. **Lint strictness** — how hard to fail on a template whose `settings.json` is valid JSON
@@ -462,4 +493,5 @@ multi-agent (`--agent`, generalized home-path table, per-agent image install).
 ---
 
 *North star (unchanged from the vision): the agent's entire self — what it was told,
-everything it remembers, and everything it did — is one versioned folder you control.*
+everything it remembers, and everything it did — is one plain folder you control. What you
+do with it — version it, archive it, wipe it — is yours to decide, outside this tool.*

@@ -1,9 +1,10 @@
 # agentdev
 
 Run a coding agent in an isolated container whose **entire "self"** — authored config,
-generated history, and learned memory — lives in a single, swappable, git-backed **profile
-folder** on the host. Run it as a **clean room**, as a **remembering agent with clean
-history**, or against a **named profile** that carries everything forward.
+generated history, and learned memory — lives in a single, swappable **profile folder** on
+the host. Run it as a **clean room**, as a **remembering agent with clean history**, or
+against a **named profile** that carries everything forward. Folders are plain directories;
+agentdev never versions them — put one under git yourself if you want history.
 
 > **Phase 1 supports Claude Code only; other agents are next.** agentdev is agent-agnostic
 > by design — a profile is simply "the home dir(s) for *this* agent." See
@@ -11,20 +12,30 @@ history**, or against a **named profile** that carries everything forward.
 > implementation.
 
 agentdev is **self-contained**: it ships its own container image, entrypoint, and mount
-library, and depends on nothing but `podman`, `git`, and `python3`.
+library, and depends on nothing but `podman` and `python3`.
 
 ## Install
 
 ```bash
-git clone <this repo> ~/src/agentdev
-ln -s ~/src/agentdev/agentdev ~/bin/agentdev     # or add the repo to PATH
-agentdev build                                   # build the container image once
-agentdev doctor                                  # verify the environment
-export ANTHROPIC_API_KEY=sk-...                  # needed for clean/remember modes
+git clone <this repo> ~/src/agentdev && cd ~/src/agentdev
+make build                       # build the container image once
+make install                     # symlink the launcher into ~/.local/bin
+make doctor                      # verify the environment
+export ANTHROPIC_API_KEY=sk-...  # needed for clean/remember modes
 ```
 
-Requirements: `podman`, `git`, `python3` (3.11+ for `tomllib`), and Linux for
+`make` with no target lists everything (`build`, `test`, `lint`, `install`, `clean`, …).
+The same actions are available without make: `agentdev build`, `agentdev doctor`,
+`tests/smoke.sh`, and symlinking `agentdev` onto your `PATH`.
+
+Requirements: `podman`, `python3` (3.11+ for `tomllib`), and Linux for
 `--userns=keep-id` ownership mapping.
+
+The image bundles the full localdev toolset — Node LTS (nvm) + TypeScript/pnpm/eslint/
+prettier, Go + TinyGo + gopls/dlv/goimports/kit/golangci-lint, `uv`, `gh`, podman-in-podman,
+the `opencode`/`omp` agents, pandoc + WeasyPrint, the networking/SDR stack (nmap, tshark,
+aircrack-ng, hackrf, rtl-sdr, soapysdr, hamlib, ax25, gpsd, usbutils) — plus the
+**[herdr](https://herdr.dev)** agent orchestrator and the Claude Code CLI.
 
 ## Use
 
@@ -41,9 +52,8 @@ agentdev --remember research        # a named store, shareable across repos
 # Fully persistent named profile — remembers everything.
 agentdev --profile research
 
-# Keep a clean run's profile to inspect what it did, then diff it.
+# Keep a clean run's profile so you can inspect (or version) what it did yourself.
 agentdev --clean --keep
-agentdev diff
 
 # Seed from a specific template; add reference material and a shared output dir.
 agentdev --clean --template ~/configs/minimal-claude -ro ~/ref/api-docs -rw ~/out
@@ -62,9 +72,8 @@ profile — never your real `~/.claude`.
 ## Management
 
 ```bash
-agentdev profiles ls|show|new|rm|fork|snapshot|gc
-agentdev memory   ls|new|rm|diff|log|revert
-agentdev diff [profile]       # a run's footprint vs. its seed (git diff)
+agentdev profiles ls|show|new|rm|fork|gc   # manage named profiles (plain folders)
+agentdev memory   ls|new|rm                # manage memory stores (plain folders)
 agentdev doctor               # check API key, podman, image, template
 agentdev init                 # write a starter .agentdev-mounts.toml
 agentdev build                # (re)build the image from image/Containerfile
@@ -100,6 +109,7 @@ templates/default/    seed template (CLAUDE.md, settings.json, hooks/, claude.js
 ## Status
 
 Phase 1 (this repo): clean / remember / named modes, `copy` template seeding with linting,
-git-backed profiles and memory stores, api-key / interactive auth, trust seeding, the full
-management surface, and `--dry-run`. Phase 2 (network allowlist, copy-on-write / patch-only
+plain-folder profiles and memory stores (agentdev never versions them), api-key /
+interactive auth, trust seeding, the full management surface, and `--dry-run`. Phase 2
+(network allowlist, copy-on-write / patch-only
 workspace, cost reporting) and Phase 3 (fleet, multi-agent) are described in the vision.

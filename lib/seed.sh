@@ -1,7 +1,11 @@
 #!/bin/bash
 # seed.sh - turn a template into a fresh profile (the "copy" strategy).
-# Requires: python3, git; globals PROFILE, TEMPLATE_SOURCE, TEMPLATE_INCLUDE[],
-# DIR_NAME, ENC, WS_TRUST, AUTH_MODE, AGENT_NAME, SELFDIR.
+# Requires: python3; globals PROFILE, TEMPLATE_SOURCE, TEMPLATE_INCLUDE[], DIR_NAME,
+# ENC, WS_TRUST, AUTH_MODE, AGENT_NAME, SELFDIR.
+#
+# agentdev does not version folders. It writes a .gitignore purely as a secrets guard
+# so that IF you choose to put the folder under git (or similar) yourself, credentials
+# are already excluded. No git commands are ever run by this tool.
 
 # lint_template DIR - returns nonzero (and explains on stderr) if the template is
 # malformed. Callers that want fail-closed behavior do: lint_template "$x" || exit 1.
@@ -82,7 +86,13 @@ seed_profile() {
   : > "$PROFILE/.claude/history.jsonl"
 
   _write_claude_json "$PROFILE/.claude.json"
+  _write_gitignore
+}
 
+# _write_gitignore - drop a secrets-excluding .gitignore so that if the folder is ever
+# versioned externally (by you, not by agentdev), credentials can't be committed.
+_write_gitignore() {
+  [[ -f "$PROFILE/.gitignore" ]] && return 0
   cat > "$PROFILE/.gitignore" <<'EOF'
 # Secrets must never be versioned or pushed.
 .claude/.credentials.json
@@ -90,22 +100,16 @@ seed_profile() {
 EOF
 }
 
-# git_init_profile - make the profile a git repo with the seed as its first commit.
-git_init_profile() {
-  [[ "$VCS" == "git" ]] || return 0
-  git -C "$PROFILE" init -q
-  git -C "$PROFILE" add -A
-  git -C "$PROFILE" -c user.name=agentdev -c user.email=agentdev@localhost \
-      commit -q -m "seed: ${AGENT_NAME} profile (${MODE})" || true
-}
-
-# snapshot_profile MSG - commit the current profile state (post-run).
-snapshot_profile() {
-  [[ "$VCS" == "git" ]] || return 0
-  [[ -d "$PROFILE/.git" ]] || return 0
-  git -C "$PROFILE" add -A
-  if ! git -C "$PROFILE" diff --cached --quiet 2>/dev/null; then
-    git -C "$PROFILE" -c user.name=agentdev -c user.email=agentdev@localhost \
-        commit -q -m "${1:-run snapshot}" || true
+# inherit_host_credentials HOST_CREDS - copy the host's Claude Code subscription
+# credentials into the profile (private; excluded by .gitignore). Used by
+# auth=inherit-credentials so a named profile reuses the login you already have.
+inherit_host_credentials() {
+  local host_creds="$1"
+  if [[ ! -r "$host_creds" ]]; then
+    echo "Error: cannot read host credentials: $host_creds" >&2
+    return 1
   fi
+  mkdir -p "$PROFILE/.claude"
+  install -m 600 "$host_creds" "$PROFILE/.claude/.credentials.json"
+  chmod 700 "$PROFILE" 2>/dev/null || true
 }

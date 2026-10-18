@@ -38,6 +38,11 @@ check "dry-run leaves no profile" "test ! -d '$T/clean'"
 check "remember --dry-run" "'$AD' --remember notes --dry-run"
 check "dry-run leaves no memory store" "test ! -d '$T/memory/notes'"
 
+echo "single-instance guard:"
+check "profile run names the container" "'$AD' --profile g1 --dry-run | grep -q -- '--name agentdev-'"
+check "profile run labels the folder"   "'$AD' --profile g1 --dry-run | grep -q -- '--label agentdev.profile='"
+check "clean run is unlabeled"           "! '$AD' --clean --dry-run | grep -q -- '--label agentdev.profile='"
+
 echo "seeding:"
 "$AD" profiles new p1 >/dev/null
 check "profile .claude/CLAUDE.md" "test -f '$T/profiles/p1/.claude/CLAUDE.md'"
@@ -46,16 +51,21 @@ check "profile memory mountpoint" "test -d '$T/profiles/p1/.claude/projects/-ws/
 check ".claude.json valid json"   "python3 -c \"import json;json.load(open('$T/profiles/p1/.claude.json'))\""
 check "meta.json present"         "test -f '$T/profiles/p1/agentdev.meta.json'"
 check "lock present"              "test -f '$T/profiles/p1/agentdev.lock'"
-check "profile is a git repo"     "git -C '$T/profiles/p1' rev-parse HEAD"
-check ".gitignore excludes creds" "grep -q credentials '$T/profiles/p1/.gitignore'"
+
+echo "no git in the tool:"
+check "profile is NOT a git repo" "! test -d '$T/profiles/p1/.git'"
+check ".gitignore guards secrets" "grep -q credentials '$T/profiles/p1/.gitignore'"
+check "no 'diff' subcommand"      "! '$AD' diff p1 2>/dev/null"
+check "no 'profiles snapshot'"    "! '$AD' profiles snapshot p1 2>/dev/null"
+check "no 'memory diff'"          "! '$AD' memory diff m1 2>/dev/null"
 
 echo "management:"
 check "profiles ls shows p1"      "'$AD' profiles ls | grep -qx p1"
 check "profiles fork"             "'$AD' profiles fork p1 p2"
 check "forked profile exists"     "test -d '$T/profiles/p2'"
 check "memory new + ls"           "'$AD' memory new m1 && '$AD' memory ls | grep -qx m1"
+check "memory store is plain dir" "! test -d '$T/memory/m1/.git'"
 check "init writes mounts file"   "'$AD' init && test -f .agentdev-mounts.toml"
-check "diff on named profile"     "'$AD' diff p1"
 
 echo "mounts:"
 cat > .agentdev-mounts.toml <<EOF
