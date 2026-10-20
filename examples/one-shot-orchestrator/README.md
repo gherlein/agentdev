@@ -61,6 +61,15 @@ export ANTHROPIC_API_KEY=sk-ant-...
 Results land in `<channel-root>/w<N>/out/result.txt` (the channel root is printed
 at startup). `agentdev.log` and `stderr.log` sit beside each result for failures.
 
+> **Autonomous (file-editing) tasks need a permission grant.** The sample tasks
+> only *read*, so `worker.sh` calls plain `claude -p`. For a task like "implement
+> the code" that edits files, add `--dangerously-skip-permissions` (or
+> `--permission-mode acceptEdits`) to the `claude` line in `worker.sh` — a headless
+> run otherwise stalls on approval prompts. The image's `clauded` alias does not
+> help here, because the command is exec'd directly rather than through an
+> interactive shell. See the root [`README.md`](../../README.md) → "Run a one-shot
+> command (autonomous agent)".
+
 ### Knobs (environment variables)
 
 | Var | Default | Meaning |

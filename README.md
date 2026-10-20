@@ -69,6 +69,55 @@ The current working directory is the read-write workspace at `/<dirname>` inside
 container and is the only project code the agent sees. Its **home**, however, is the
 profile — never your real `~/.claude`.
 
+### Run a one-shot command (autonomous agent)
+
+Everything after `--` is run **verbatim** as the container's command instead of an
+interactive shell. The container runs that one command and exits (`--rm`), and
+`agentdev` exits with the command's status — so this is how you drive a single,
+unattended agentic task:
+
+```bash
+agentdev --profile myproj -- \
+  claude --dangerously-skip-permissions -p "read the spec and implement the code"
+```
+
+Four things to get right for an unattended run:
+
+- **Working directory is your repo.** The command runs at `/<dirname>` — the current
+  directory bind-mounted in — so the agent reads the spec and edits the code in place.
+  Run `agentdev` from the project you want worked on.
+- **Auth depends on mode.** In **profile** mode, `auth = auto` inherits your host
+  subscription login into the profile, so `claude -p` just works. In **clean** and
+  **remember** modes credential inheritance is disabled, so export
+  `ANTHROPIC_API_KEY` and add `--auth api-key-env`.
+- **Grant permissions explicitly.** A headless run that edits files will otherwise
+  stall on tool-approval prompts. Pass `--dangerously-skip-permissions` (or
+  `--permission-mode acceptEdits`) **on the `claude` command itself** — the image's
+  `clauded` alias does *not* expand here, because the command is exec'd directly, not
+  through an interactive shell. `agentdev --trust` only pre-accepts the *trust
+  dialog*, not per-tool permissions, so it is not enough on its own.
+- **Preview first.** Prefix with `--dry-run` to see the exact `podman` command,
+  resolved auth/trust, and that your prompt survived quoting — before a real,
+  file-mutating run.
+
+For fanning this out across many tasks in parallel, see
+[`examples/one-shot-orchestrator/`](./examples/one-shot-orchestrator/).
+
+### Skills from a shared store
+
+A profile's `.claude/skills/` is a first-class, mounted part of its home, so you
+can populate it from [`sm`](https://github.com/brightsign-playground/sm)'s
+canonical skill store and the agent in the container reads those skills as its
+own:
+
+```bash
+sm sync --copy --agent-home ~/.agentdev/profiles/research   # real dirs, container-safe
+agentdev --profile research -- claude --dangerously-skip-permissions -p "…"
+```
+
+See [`docs/applying-sm-managed-skills.md`](./docs/applying-sm-managed-skills.md)
+for the full integration (why `--copy`, the two skill channels, and lifecycle).
+
 ## Management
 
 ```bash

@@ -23,6 +23,12 @@ if [[ "${AGENT_STUB:-0}" == 1 ]]; then
   printf 'STUB RESULT\ntask: %s\npid: %s\n' "$task" "$$" > "$tmp"
 else
   # The real one-shot: headless Claude Code. Its stdout is the answer.
+  #
+  # The sample tasks only READ, so plain `claude -p` is enough. For an AUTONOMOUS
+  # task that EDITS files ("implement the code"), add --dangerously-skip-permissions
+  # (or --permission-mode acceptEdits) here — otherwise the run stalls on approval
+  # prompts. The container's `clauded` alias does NOT apply: this is exec'd directly,
+  # not an interactive shell.
   if ! claude -p "$task" > "$tmp" 2> "$OUT/stderr.log"; then
     cp "$tmp" "$OUT/partial.txt" 2>/dev/null || true
     echo "agent failed; see $OUT/stderr.log" >&2
