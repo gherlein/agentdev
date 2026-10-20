@@ -138,7 +138,7 @@ agentdev [flags] [mount-args...] [-- command...]
   ├─ resolve MODE → resolve PROFILE path (clean_root/<run-id> | profiles_root/<name>)
   ├─ if profile absent OR clean:  seed.sh   (lint template, copy, scaffold, .claude.json, .gitignore guard)
   ├─ if remember:                 memory.sh (resolve store, compute $ENC, ensure mount point)
-  ├─ lock the profile (flock)                        # named mode: refuse 2nd concurrent use
+  ├─ lock the profile (flock) + assert no live container (named mode: refuse 2nd concurrent use — §2.5)
   ├─ source lib/mounts.sh; collect_mounts "agentdev" "$DIR_NAME" "$@"; collect_host_ca_mount
   ├─ build PROFILE_MOUNT (+ MEMORY_MOUNT); register_target the memory path
   ├─ assemble podman argv (workspace, userns, ssh, ca, api-key, HOST_* env, profile)
@@ -146,6 +146,40 @@ agentdev [flags] [mount-args...] [-- command...]
   ├─ podman run ... ghcr.io/gherlein/agentdev@sha256:…  (bash by default, or trailing -- command)
   └─ on exit (trap): rm -rf if clean & !--keep ; named/kept folders are left as-is
 ```
+
+### 2.5 Single-instance guarantee for named profiles
+
+A named profile is a shared, persistent folder that the run mounts **read-write** and
+mutates live (`.claude/`, `.claude.json`). Two runs on the same profile at once would be
+two writers of one folder — last-writer-wins corruption of `.claude.json`, racing writes
+to history. So the invariant is: **at most one run may hold a named profile at a time.**
+The resource being protected is the *folder*, not any one process; the launcher and the
+container are both just writers of it. Clean and `remember` modes need no guard — each run
+gets its own `clean_root/<run-id>` folder, so there is nothing shared to protect.
+
+The guarantee is layered, because no single mechanism covers every failure:
+
+1. **`flock` on `<profile>/.agentdev.lock-file`** (`lock_profile`). Held by the launcher
+   for its lifetime; serializes two launchers racing through the seed/prep window before
+   any container exists. The fd is **not** inherited by the podman child (`{FD}>&-` on the
+   `podman run`), so an orphaned container can't pin the lock, and a dead launcher releases
+   it immediately.
+
+2. **Live-writer assertion** (`assert_profile_free`). `flock` only sees *launchers*; it
+   cannot see a container that is still mounting the folder after its launcher was killed.
+   So before launching we also refuse if `podman ps` shows a running container labeled
+   `agentdev.profile=<path>`. This is the authoritative test of "is the folder being
+   written right now," and it points the user at `profiles gc` to reap an orphan.
+
+3. **Fixed container name** (`--name agentdev-<sha256(path)[:12]>`). The runtime itself is
+   the backstop: podman refuses a second `run` while a container with that name exists, and
+   `--rm` frees the name exactly when the container stops. This holds even across `kill -9`
+   of the launcher, closing the gap between layers 1 and 2.
+
+`profiles gc` ties it together: for each container labeled `agentdev.profile`, it tries to
+take that profile's `flock` — success means no launcher is attached (orphan → `podman rm
+-f`, done while holding the lock so a fresh launch can't race in), failure means the run is
+live (left alone).
 
 ---
 
@@ -158,7 +192,7 @@ agentdev [flags] [mount-args...] [-- command...]
 | **Entrypoint** | `image/entrypoint.sh` | UID/GID remap, host-home symlink, CA rebuild, gosu exec |
 | **Mount library** | `lib/mounts.sh` | External-mount union, collisions, CA, SSH, `init` |
 | **Config resolver** | `lib/config.sh` | Merge CLI / per-project / user / defaults into one settled config |
-| **Profile manager** | `lib/profile.sh` | Resolve path per mode, create dir, `flock`, `fork`, `gc`, `rm` (plain folders) |
+| **Profile manager** | `lib/profile.sh` | Resolve path per mode, create dir, single-instance guard (`flock` + live-container assert + fixed `--name`, §2.5), `fork`, `gc`, `rm` (plain folders) |
 | **Seeder** | `lib/seed.sh` | Lint template, copy `include`, build runtime scaffold + `.claude.json`, `.gitignore` secrets guard |
 | **Memory manager** | `lib/memory.sh` | Resolve store under `memory_root`, compute `$ENC`, create mount point |
 | **Meta/lock writer** | `lib/meta.sh` | `agentdev.meta.json`, `agentdev.lock` (image digest, CLI ver, template hash) |
@@ -202,7 +236,7 @@ agentdev [MODE] [OPTIONS] [MOUNT-ARGS...] [-- COMMAND...]
 
 | Command | Phase 1 behavior |
 |---|---|
-| `agentdev profiles ls\|show\|new\|rm\|fork\|gc` | Manage `profiles_root`; `gc` sweeps crashed `clean_root` leftovers |
+| `agentdev profiles ls\|show\|new\|rm\|fork\|gc` | Manage `profiles_root`; `gc` sweeps crashed `clean_root` leftovers **and reaps orphaned profile containers** (§2.5) |
 | `agentdev memory ls\|new\|rm` | Manage `memory_root` stores (plain folders) |
 | `agentdev doctor` | Check API key, podman, image digest, template readability + lint |
 | `agentdev init` | Write a starter `.agentdev-mounts.toml` in the launch directory |

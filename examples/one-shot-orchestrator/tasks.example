@@ -1,0 +1,7 @@
+# One task per line. Blank lines and lines starting with '#' are ignored by
+# orchestrate.sh (it strips blank lines; '#' lines are passed as tasks only if
+# you remove this header — keep them commented out as examples below).
+Summarize what agentdev does in three sentences.
+List the files under lib/ and say what each is responsible for.
+Explain the single-instance profile guard in one paragraph.
+Propose one improvement to the one-shot orchestrator example.
