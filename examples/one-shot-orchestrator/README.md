@@ -88,6 +88,23 @@ as a demonstration of the inbound (master → agent) file channel. You could ins
 pass it as an argv element (`-- bash worker.sh "$task"`); agentdev forwards the
 trailing `-- …` verbatim, so a single arg survives intact.
 
+## Spawn siblings, not nested containers
+
+The controller runs on the **host** and spawns workers as **sibling** containers.
+Do **not** have a worker create another agentdev container *inside itself*:
+
+- It is not supported by default — the image runs unprivileged with no
+  `/dev/fuse`, so nested rootless podman typically fails, and neither the
+  `agentdev` launcher nor its image is present inside a worker.
+- Even forced to work, the nested container's profile and workspace live inside
+  the outer container (ephemeral, lost on exit, a second overlay layer).
+- Agents nesting agents have no central concurrency limit — a container
+  fork-bomb.
+
+If a worker needs more instances, it should **request them from the host master**
+over the channel (write a request into `in/`/`out/`), and the master — which owns
+concurrency and cleanup — launches the new siblings. Keep the topology flat.
+
 ## Extending this
 
 - **Streaming progress, not just a final result.** Keep the one-shot structure but
