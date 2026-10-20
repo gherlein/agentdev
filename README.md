@@ -69,6 +69,36 @@ The current working directory is the read-write workspace at `/<dirname>` inside
 container and is the only project code the agent sees. Its **home**, however, is the
 profile — never your real `~/.claude`.
 
+### What isolation does and doesn't cover
+
+A profile isolates the agent's **on-disk home** — its config, history, memory, and
+any locally-registered MCP servers (`.mcp.json`). A `--clean` run starts from the
+seed template with none of your real `~/.claude` config. That is filesystem
+isolation.
+
+It does **not** isolate your **claude.ai account**. If you log the agent into a
+Claude subscription (the default interactive auth), **claude.ai connectors** —
+account-level MCP servers like Atlassian, Microsoft 365, Slack, or Claude Docs,
+configured in claude.ai and served by its backend — appear in the session even in
+`--clean` mode. They are not stored in the profile and were not put there by
+agentdev; they follow whoever you log in as, the same way they would in any Claude
+Code session on that account. So:
+
+- `/mcp` inside the container will list those connectors, with 0 local MCP servers
+  of agentdev's own.
+- A "clean room" is a clean **disk**, not a clean **account**.
+
+To control them, work at the account/login level, not the profile:
+
+- Disconnect the connector in **claude.ai** settings (affects every session), or
+- `/mcp` → toggle it off in-session (persists in a `--profile`, but is discarded
+  each run in `--clean`), or
+- Use an **API-key-only** session (`--auth api-key-env`, no subscription login),
+  which generally does not surface subscription connectors.
+
+See [`docs/managing-context-and-memory.md`](./docs/managing-context-and-memory.md)
+for the three kinds of MCP server and how each is controlled.
+
 ### Run a one-shot command (autonomous agent)
 
 Everything after `--` is run **verbatim** as the container's command instead of an
