@@ -14,6 +14,11 @@ agentdev never versions them — put one under git yourself if you want history.
 agentdev is **self-contained**: it ships its own container image, entrypoint, and mount
 library, and depends on nothing but `podman` and `python3`.
 
+📖 **New here? The [User Guide](./docs/user-guide.md) is the complete, end-to-end
+walkthrough** — install, modes, auth, trust, mounting folders, profiles, memory,
+skills, MCP, orchestration, configuration, and troubleshooting. This README is the
+quick overview.
+
 ## Install
 
 ```bash
