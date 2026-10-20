@@ -59,6 +59,18 @@ check "no 'diff' subcommand"      "! '$AD' diff p1 2>/dev/null"
 check "no 'profiles snapshot'"    "! '$AD' profiles snapshot p1 2>/dev/null"
 check "no 'memory diff'"          "! '$AD' memory diff m1 2>/dev/null"
 
+echo "auth inheritance (account merge):"
+HJ="$T/host.claude.json"; PJ="$T/prof.claude.json"
+printf '%s' '{"userID":"h","hasAvailableSubscription":true,"oauthAccount":{"accountUuid":"a","emailAddress":"e"},"projects":{"/x":1},"subscriptionNoticeCount":9}' > "$HJ"
+printf '%s' '{"numStartups":0,"hasCompletedOnboarding":true}' > "$PJ"
+( source "$REPO/lib/seed.sh"; inherit_host_account "$HJ" "$PJ" ) >/dev/null 2>&1
+check "oauthAccount merged"        "python3 -c \"import json;assert 'oauthAccount' in json.load(open('$PJ'))\""
+check "subscription flag merged"   "python3 -c \"import json;assert json.load(open('$PJ')).get('hasAvailableSubscription') is True\""
+check "seeded fields preserved"    "python3 -c \"import json;assert json.load(open('$PJ')).get('hasCompletedOnboarding') is True\""
+check "host projects not leaked"   "python3 -c \"import json;assert '/x' not in (json.load(open('$PJ')).get('projects') or {})\""
+check "noticeCount not leaked"     "python3 -c \"import json;assert 'subscriptionNoticeCount' not in json.load(open('$PJ'))\""
+check "no-account host is tolerated" "printf '%s' '{}' > '$HJ'; source '$REPO/lib/seed.sh'; inherit_host_account '$HJ' '$PJ'"
+
 echo "management:"
 check "profiles ls shows p1"      "'$AD' profiles ls | grep -qx p1"
 check "profiles fork"             "'$AD' profiles fork p1 p2"

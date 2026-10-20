@@ -452,9 +452,17 @@ specific mode.
 - **api-key-env.** Forward `ANTHROPIC_API_KEY` into the container (`-e ANTHROPIC_API_KEY=…`)
   and seed no `.credentials.json`; fail-closed if the key is unset.
 - **inherit-credentials** (named profiles only). Copy the host's subscription
-  `~/.claude/.credentials.json` into the profile once, mode `600`, gitignored — so "it just
-  works" with the Claude Pro/Max login you already have. Refused for clean/remember: a
-  secret is never copied into a throwaway home (preserves the clean-room guarantee).
+  `~/.claude/.credentials.json` into the profile once, mode `600`, gitignored — **and**
+  merge the host's claude.ai account linkage (`oauthAccount`, `hasAvailableSubscription`,
+  `userID`) from `~/.claude.json` into the profile's seeded `.claude.json` (an allowlist of
+  non-secret fields — no tokens, no project history). The token alone is inert: Claude Code
+  only treats a session as a signed-in subscription when the account block is present too,
+  so copying the token *and* the account is what actually reuses the login (connectors,
+  managed settings, org policy). Refused for clean/remember: a secret is never copied into a
+  throwaway home (preserves the clean-room guarantee). Caveat: this reconstitutes a sign-in
+  the host login already has; it cannot add an OAuth scope the host token lacks (a host
+  login "missing the `user:profile` scope" stays missing it — sign in inside the profile to
+  mint a fresh, fully-scoped token, which persists in the named profile).
 - **interactive.** Forward nothing; log in inside the container. The profile's `.claude` is
   bind-mounted `:rw`, so the login writes `.credentials.json` into the profile — lasting for
   a named profile, ephemeral (discarded) for clean/remember.

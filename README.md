@@ -117,9 +117,11 @@ Four things to get right for an unattended run:
   directory bind-mounted in — so the agent reads the spec and edits the code in place.
   Run `agentdev` from the project you want worked on.
 - **Auth depends on mode.** In **profile** mode, `auth = auto` inherits your host
-  subscription login into the profile, so `claude -p` just works. In **clean** and
-  **remember** modes credential inheritance is disabled, so export
-  `ANTHROPIC_API_KEY` and add `--auth api-key-env`.
+  subscription login — both the token and the claude.ai account block — into the
+  profile, so `claude -p` works with connectors and managed settings. (If your host
+  login lacks a needed scope, sign in once inside the profile with `claude auth
+  login`; it persists.) In **clean** and **remember** modes credential inheritance
+  is disabled, so export `ANTHROPIC_API_KEY` and add `--auth api-key-env`.
 - **Grant permissions explicitly.** A headless run that edits files will otherwise
   stall on tool-approval prompts. Pass `--dangerously-skip-permissions` (or
   `--permission-mode acceptEdits`) **on the `claude` command itself** — the image's

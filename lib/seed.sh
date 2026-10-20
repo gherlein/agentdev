@@ -113,3 +113,58 @@ inherit_host_credentials() {
   install -m 600 "$host_creds" "$PROFILE/.claude/.credentials.json"
   chmod 700 "$PROFILE" 2>/dev/null || true
 }
+
+# inherit_host_account HOST_CLAUDE_JSON OUT_CLAUDE_JSON - merge the host's claude.ai
+# account linkage into the profile's seeded .claude.json. The copied .credentials.json
+# holds the OAuth tokens, but Claude Code only treats a session as a signed-in claude.ai
+# subscription when the account block (oauthAccount) is also present; without it the
+# token is inert — no connectors, no managed settings, no org policy. We copy only the
+# non-secret account metadata (no tokens; those live in .credentials.json), so a named
+# profile actually reuses the host login instead of just carrying a dead token.
+#
+# Best-effort: a missing/unreadable host file, or one with no account block, is not an
+# error (the user just signs in inside the profile). Note: this cannot add an OAuth
+# scope the host token never had (e.g. a "missing user:profile scope" host login stays
+# missing it); it only reconstitutes the sign-in a properly scoped host login already has.
+inherit_host_account() {
+  local host_json="$1" out_json="$2"
+  if [[ ! -r "$host_json" ]]; then
+    echo "Note: no readable host ~/.claude.json; sign in inside the profile if subscription features are missing." >&2
+    return 0
+  fi
+  python3 - "$host_json" "$out_json" <<'PY' || true
+import json, sys
+
+host_path, out_path = sys.argv[1], sys.argv[2]
+
+# Account-linked, non-secret fields. Tokens are NOT here (they are in
+# .credentials.json); this is deliberately an allowlist, never the whole file.
+ACCOUNT_KEYS = ("oauthAccount", "hasAvailableSubscription", "userID")
+
+try:
+    with open(host_path) as fh:
+        host = json.load(fh)
+except Exception:
+    sys.exit(0)  # best-effort; nothing to inherit
+
+if not isinstance(host.get("oauthAccount"), dict):
+    sys.stderr.write(
+        "Note: host ~/.claude.json has no oauthAccount block; "
+        "sign in inside the profile ('claude auth login') for subscription features.\n")
+    sys.exit(0)
+
+try:
+    with open(out_path) as fh:
+        out = json.load(fh)
+except Exception:
+    out = {}
+
+for key in ACCOUNT_KEYS:
+    if key in host:
+        out[key] = host[key]
+
+with open(out_path, "w") as fh:
+    json.dump(out, fh, indent=2)
+    fh.write("\n")
+PY
+}

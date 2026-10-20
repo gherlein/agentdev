@@ -210,7 +210,8 @@ launch() {
     # Inherit the host's subscription login into the profile (once) so "it just works."
     if [[ "$AUTH_EFFECTIVE" == inherit-credentials && ! -f "$PROFILE/.claude/.credentials.json" ]]; then
       inherit_host_credentials "$HOST_CREDS" || exit 1
-      echo "Auth: copied host subscription credentials into profile (kept private, excluded by .gitignore)." >&2
+      inherit_host_account "$HOME/.claude.json" "$PROFILE/.claude.json"
+      echo "Auth: copied host subscription credentials + account into profile (token kept private, excluded by .gitignore)." >&2
     fi
   fi
 
