@@ -20,10 +20,11 @@ configuration, and troubleshooting. For *why* it is built this way see
 10. [Skills](#10-skills)
 11. [MCP servers and claude.ai connectors](#11-mcp-servers-and-claudeai-connectors)
 12. [Running many agents (orchestration)](#12-running-many-agents-orchestration)
-13. [Configuration](#13-configuration)
-14. [Reproducibility](#14-reproducibility)
-15. [Troubleshooting](#15-troubleshooting)
-16. [Command and flag reference](#16-command-and-flag-reference)
+13. [Skill-evaluation sandbox](#13-skill-evaluation-sandbox)
+14. [Configuration](#14-configuration)
+15. [Reproducibility](#15-reproducibility)
+16. [Troubleshooting](#16-troubleshooting)
+17. [Command and flag reference](#17-command-and-flag-reference)
 
 ---
 
@@ -190,6 +191,20 @@ container root; relative → under the workspace. Sources accept `~` and `$VAR`.
 Relative sources and `"&"` are portable (safe to commit); absolute host paths
 should stay gitignored. A syntax error in this file aborts the launch.
 
+Two things about relative paths:
+
+- **The two "relative" anchors differ.** A relative *source* is resolved against
+  the directory you launch from (the host side). A relative *destination* is
+  resolved under the **workspace** (`/<dirname>`, the container side). A relative
+  source + relative destination is the portable combination — the folder lands at
+  a stable path inside the workspace regardless of absolute host locations.
+- **A destination under the workspace is a nested mount and shadows your PWD.**
+  `"~/out/build" = "build"` mounts at `/<dirname>/build`, so the agent sees the
+  mounted source there, not any `./build` your launch directory actually contains.
+  That is usually the intent (a generated-output or shared-assets dir), but be
+  deliberate — the real `./build` is hidden for that run. You cannot target the
+  workspace root `/<dirname>` itself (it is reserved); subpaths are fine.
+
 ### c. `AGENTDEV_MOUNTS` env var (read-only)
 
 ```bash
@@ -202,9 +217,10 @@ defaults in your shell profile.
 ### Rules for all three
 
 - The folder must exist and be a directory (non-existent paths warn and skip).
-- **One mount per container destination** — a collision is fatal. The agent's own
-  paths are reserved and cannot be targeted (`/home/developer/.claude`,
-  `.claude.json`, `.ssh`, `.npm`, `mounts`, `/ssh-agent`, the CA dir).
+- **One mount per container destination** — a collision is fatal. The workspace
+  root `/<dirname>` and the agent's own paths are reserved and cannot be targeted
+  (`/home/developer/.claude`, `.claude.json`, `.ssh`, `.npm`, `mounts`,
+  `/ssh-agent`, the CA dir); subpaths of the workspace are fine.
 - `--dry-run` prints the full resolved mount plan (`-v host:container:mode`).
 - The whole mount map is written to `/home/developer/mounts` inside, so the agent
   can see what it has.
@@ -293,7 +309,127 @@ Key rules: use `--clean` workers (no lock, fully concurrent) or forked profiles 
 never point many runs at one `--profile`; and **spawn siblings from the host,
 never nest** agentdev inside a worker container.
 
-## 13. Configuration
+## 13. Skill-evaluation sandbox
+
+A locked-down profile for *evaluating skills*: no network except an allowlist,
+every read-write mount confirmed, a read-only workspace, and no host SSH. One
+flag turns it all on:
+
+```bash
+export ANTHROPIC_API_KEY=sk-...                       # eval uses api-key auth, not a subscription
+agentdev --eval --profile skill-eval -- \
+  claude --dangerously-skip-permissions -p "use the available skills to do X"
+```
+
+`--eval` sets these (each still overridable by an explicit flag or config):
+
+| Policy | `--eval` value | Why |
+|---|---|---|
+| Network | `allowlist` (default allow = `api.anthropic.com`), egress logged | No exfiltration path beyond what you list |
+| Workspace | read-only | Skills can't mutate the eval harness |
+| RW mounts | confirm each (fail-closed with no TTY) | No silent write access |
+| Auth | `api-key-env` | No subscription → no claude.ai connectors leak in |
+| Trust | `workspace-only` | Not `skip-permissions` |
+| SSH | off | No host keys/agent in the sandbox |
+
+### Provisioning the skills under test
+
+The skills come from `sm` (copy mode) or a template — not from `--eval`:
+
+```bash
+# put ONLY the skills under test in a store, then copy them into the profile
+sm sync --copy --store ~/eval-skills --agent-home ~/.agentdev/profiles/skill-eval
+```
+
+(see [`applying-sm-managed-skills.md`](./applying-sm-managed-skills.md)).
+
+### Tuning it with config instead of the preset
+
+Spell the policy out in the harness directory's `./.agentdev.toml` (a ready
+example ships at `templates/skill-eval/agentdev.toml.example`):
+
+```toml
+[network]
+mode  = "allowlist"
+allow = ["api.anthropic.com", "registry.npmjs.org:443"]   # keep MINIMAL
+log   = true
+# mitm = true     # tier 3: per-URL (path) filtering of HTTPS — see below
+
+[mounts]
+confirm_rw = true
+workspace  = "ro"
+
+[sandbox]
+ssh = false
+```
+
+Allowlist entries are `host`, `host:port`, `*.wildcard.host`, or `host/path/prefix`
+(one per line / array element).
+
+### How the network lockdown works
+
+`--net=allowlist` puts the agent on an **internal** podman network (no route out)
+and runs a small **proxy sidecar** that is the only thing with egress. The agent
+reaches the outside *only* through the proxy, which permits just the allowlist
+and refuses everything else — so a skill that ignores the proxy and opens a raw
+socket reaches nothing. `--net=none` is the fully-offline variant.
+
+- **Domain level (default):** HTTPS is tunnelled by host (`host:port`), not
+  decrypted. A `host/path` rule can't be enforced on an opaque HTTPS tunnel, so
+  it is refused unless MITM is on.
+- **Per-URL (tier 3, `mitm = true`):** the proxy terminates TLS with a generated
+  CA the agent is told to trust, and matches the full URL path. Heavier and can
+  break pinned clients — use only when you truly need path filtering. Requires
+  `openssl` in the image (shipped).
+
+### Confirming read-write mounts
+
+With `confirm_rw`, every rw mount prompts `Allow READ-WRITE mount <host> -> <target>? [y/N]`
+on the terminal; a run with no terminal **denies** (fail-closed). For automation,
+pre-approve a known-good set non-interactively:
+
+```bash
+agentdev --eval --rw-allow ~/eval-out --profile skill-eval -rw ~/eval-out -- …
+```
+
+### Reviewing what the run reached
+
+Egress is logged (under `--eval`); summarize it afterward:
+
+```bash
+agentdev report skill-eval
+#   requests: 12   allow: 11   deny: 1
+#   destinations (count  decision  host:port):
+#       9  ALLOW  api.anthropic.com:443
+#       1  DENY   telemetry.example.com:443
+```
+
+(The log lives at `<profile>/agentdev-egress.log`, so use a persistent `--profile`
+or `--keep` to retain it.)
+
+### A complete example
+
+```bash
+# 1. build a store with just the skills to evaluate
+mkdir -p ~/eval-skills && cp -r ~/src/my-plugin/skills/my-skill ~/eval-skills/
+
+# 2. create and provision the eval profile
+agentdev profiles new skill-eval
+sm sync --copy --store ~/eval-skills --agent-home ~/.agentdev/profiles/skill-eval
+
+# 3. preview the locked-down plan
+ANTHROPIC_API_KEY=$KEY agentdev --eval --profile skill-eval --dry-run
+
+# 4. run the evaluation (writes only to the approved output dir)
+ANTHROPIC_API_KEY=$KEY agentdev --eval --rw-allow ~/eval-out \
+  --profile skill-eval -rw ~/eval-out -- \
+  claude --dangerously-skip-permissions -p "Exercise my-skill on the fixtures in /agentdev and write results to /external/eval-out"
+
+# 5. audit egress
+agentdev report skill-eval
+```
+
+## 14. Configuration
 
 Resolution order, first found wins per key (CLI flags, applied after, always win):
 
@@ -325,12 +461,26 @@ mode = "auto"                                    # auto | api-key-env | interact
 [workspace]
 isolation = "mount"
 trust     = "skip-permissions"                   # skip-permissions | workspace-only | prompt
+
+# Sandbox / skill-evaluation policy (all off by default; see §13):
+[network]
+mode  = "off"                                    # off | allowlist | none
+allow = []                                       # host | host:port | *.host | host/path (for allowlist)
+log   = false                                    # record egress for `agentdev report`
+mitm  = false                                    # tier 3: per-URL HTTPS filtering (needs openssl)
+
+[mounts]
+confirm_rw = false                               # prompt before every read-write mount
+workspace  = "rw"                                # rw | ro
+
+[sandbox]
+ssh = true                                       # mount host SSH keys / agent
 ```
 
 A config file that fails to parse aborts the launch (fail-closed). `agentdev init`
 (no relation to config) writes a starter `.agentdev-mounts.toml`, not this file.
 
-## 14. Reproducibility
+## 15. Reproducibility
 
 Each seeded profile records two files:
 
@@ -342,7 +492,7 @@ Each seeded profile records two files:
 Pin `agent.image` by `@sha256:…` digest (not a tag) for a run you can reproduce
 later; `agentdev doctor` warns when the image is a floating tag.
 
-## 15. Troubleshooting
+## 16. Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
@@ -355,7 +505,7 @@ later; `agentdev doctor` warns when the image is a floating tag.
 | Mount "collision" error | Two mounts resolve to the same container path, or you targeted a reserved path. See §7. |
 | Build/env problems | `agentdev doctor` checks podman, image, template, and (for `api-key-env`) the key. |
 
-## 16. Command and flag reference
+## 17. Command and flag reference
 
 ```
 agentdev [MODE] [OPTIONS] [MOUNT-ARGS...] [-- COMMAND...]
@@ -364,10 +514,13 @@ Modes:    --clean | --remember [store] | --profile <name>
 Options:  --template <path> | --auth <mode> | --login | --trust <mode>
           --keep | --reseed | --dry-run
 Mounts:   -ro <path> | -rw <path> | <dir> (ro) | /dev/* (device)
+Sandbox:  --eval | --net <off|allowlist|none> | --confirm-rw | --rw-allow <path>
+          --workspace-ro | --no-ssh
 
 Subcommands:
   profiles  ls | show <name> | new <name> | rm <name> | fork <src> <dst> | gc
   memory    ls | new <name> | rm <name>
+  report <profile>   show a profile's egress log (from --net=allowlist)
   doctor    check the environment
   init      write a starter .agentdev-mounts.toml
   build     build the agentdev image locally

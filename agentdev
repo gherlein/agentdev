@@ -11,7 +11,7 @@ set -euo pipefail
 SELFDIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 LIBDIR="$SELFDIR/lib"
 
-for m in config mounts meta seed memory profile; do
+for m in config mounts meta seed memory profile net; do
   # shellcheck source=/dev/null
   source "$LIBDIR/$m.sh"
 done
@@ -37,9 +37,19 @@ Options:
   --dry-run             print the settled plan and the podman command; do not launch
   -ro <path> / -rw <path> / <dir> / /dev/*   extra mounts
 
+Sandbox (skill-evaluation) options:
+  --eval                locked-down preset: allowlist net + confirm-rw + ro workspace
+                        + api-key auth + no SSH (see docs/user-guide.md)
+  --net <mode>          off | allowlist | none   (egress isolation; VISION §10)
+  --confirm-rw          prompt before every read-write mount (fail-closed, no TTY)
+  --rw-allow <path>     pre-approve a read-write mount for --confirm-rw (repeatable)
+  --workspace-ro        mount the workspace read-only
+  --no-ssh              do not mount host SSH keys / agent
+
 Subcommands:
   profiles  ls|show|new|rm|fork|gc
   memory    ls|new|rm
+  report <profile>              show a profile's egress log (from --net=allowlist)
   doctor                        check the environment
   init                          write a starter .agentdev-mounts.toml
   build                         build the agentdev image locally
@@ -82,6 +92,8 @@ launch() {
   local MEMORY_NAME="default" TEMPLATE_OVERRIDE="" TRUST_OVERRIDE="" AUTH_OVERRIDE=""
   local RESEED=no DRY_RUN=no
   local MOUNT_ARGS=() COMMAND=()
+  local NET_OVERRIDE="" WS_MODE_OVERRIDE="" SSH_OVERRIDE="" CONFIRM_RW_OVERRIDE="" EVAL_PRESET=no
+  RW_ALLOW=()
   MODE=""; KEEP=no
 
   while [[ $# -gt 0 ]]; do
@@ -100,6 +112,13 @@ launch() {
       --keep)     KEEP=yes ;;
       --reseed)   RESEED=yes ;;
       --dry-run)  DRY_RUN=yes ;;
+      --eval)         EVAL_PRESET=yes ;;
+      --net)          NET_OVERRIDE="${2:?--net needs off|allowlist|none}"; shift ;;
+      --net=*)        NET_OVERRIDE="${1#--net=}" ;;
+      --confirm-rw)   CONFIRM_RW_OVERRIDE=yes ;;
+      --workspace-ro) WS_MODE_OVERRIDE=ro ;;
+      --no-ssh)       SSH_OVERRIDE=false ;;
+      --rw-allow)     RW_ALLOW+=("${2:?--rw-allow needs a path}"); shift ;;
       -ro|-rw)    MOUNT_ARGS+=("$1" "${2:?$1 needs a path}"); shift ;;
       /dev/*)     MOUNT_ARGS+=("$1") ;;
       --)         shift; COMMAND=("$@"); break ;;
@@ -126,6 +145,28 @@ launch() {
   [[ -n "$TEMPLATE_OVERRIDE" ]] && TEMPLATE_SOURCE="$(expand_tilde "$TEMPLATE_OVERRIDE")"
   [[ -n "$TRUST_OVERRIDE" ]] && WS_TRUST="$TRUST_OVERRIDE"
   [[ -n "$AUTH_OVERRIDE" ]] && AUTH_MODE="$AUTH_OVERRIDE"
+
+  # Sandbox-policy CLI overrides (win over config).
+  [[ -n "$NET_OVERRIDE" ]] && NET_MODE="$NET_OVERRIDE"
+  [[ -n "$WS_MODE_OVERRIDE" ]] && WS_MOUNT_MODE="$WS_MODE_OVERRIDE"
+  [[ -n "$SSH_OVERRIDE" ]] && SANDBOX_SSH="$SSH_OVERRIDE"
+  [[ "$CONFIRM_RW_OVERRIDE" == yes ]] && CONFIRM_RW=true
+
+  # --eval: a locked-down profile for evaluating skills. Fills only policy the
+  # caller/config hasn't already set, so explicit flags and config still win.
+  if [[ "$EVAL_PRESET" == yes ]]; then
+    [[ -z "$NET_OVERRIDE" && "$NET_MODE" == off ]] && NET_MODE=allowlist
+    [[ -z "$WS_MODE_OVERRIDE" ]] && WS_MOUNT_MODE=ro
+    [[ -z "$SSH_OVERRIDE" ]] && SANDBOX_SSH=false
+    CONFIRM_RW=true
+    NET_LOG=true                      # eval wants an auditable egress record (agentdev report)
+    [[ -z "$AUTH_OVERRIDE" && "$AUTH_MODE" == auto ]] && AUTH_MODE=api-key-env
+    [[ -z "$TRUST_OVERRIDE" && "$WS_TRUST" == skip-permissions ]] && WS_TRUST=workspace-only
+    [[ ${#NET_ALLOW[@]} -eq 0 ]] && NET_ALLOW=("api.anthropic.com")
+  fi
+
+  case "$NET_MODE" in off|allowlist|none) ;; *) echo "Error: unknown network mode '$NET_MODE' (off|allowlist|none)" >&2; exit 1 ;; esac
+  case "$WS_MOUNT_MODE" in rw|ro) ;; *) echo "Error: unknown mounts.workspace '$WS_MOUNT_MODE' (rw|ro)" >&2; exit 1 ;; esac
   case "$AUTH_MODE" in
     auto|api-key-env|interactive|inherit-credentials) ;;
     *) echo "Error: unknown auth mode '$AUTH_MODE' (auto|api-key-env|interactive|inherit-credentials)" >&2; exit 1 ;;
@@ -217,6 +258,10 @@ launch() {
 
   # Collect external mounts (ours), then the host CA passthrough.
   collect_mounts "agentdev" "$DIR_NAME" "${MOUNT_ARGS[@]}"
+  # The workspace is itself a read-write mount unless made read-only; confirm it too.
+  if [[ "$WS_MOUNT_MODE" == rw && "$CONFIRM_RW" == true ]]; then
+    confirm_rw_mount "$PWD" "/$DIR_NAME" || { echo "Error: workspace read-write declined; re-run with --workspace-ro." >&2; exit 1; }
+  fi
   collect_host_ca_mount
 
   # The profile mount - the whole point: the agent's home is this folder, not yours.
@@ -237,8 +282,8 @@ launch() {
 
   # Host passthroughs (SSH keys/agent, api key, userns, workspace).
   local SSH_MOUNT=() SSH_AGENT=() API_ENV=() USERNS=() USB=()
-  [[ -d "$HOME/.ssh" ]] && SSH_MOUNT=("-v" "$HOME/.ssh:/home/developer/.ssh:ro")
-  if [[ -n "${SSH_AUTH_SOCK:-}" && -S "${SSH_AUTH_SOCK:-}" ]]; then
+  [[ "$SANDBOX_SSH" == true && -d "$HOME/.ssh" ]] && SSH_MOUNT=("-v" "$HOME/.ssh:/home/developer/.ssh:ro")
+  if [[ "$SANDBOX_SSH" == true && -n "${SSH_AUTH_SOCK:-}" && -S "${SSH_AUTH_SOCK:-}" ]]; then
     SSH_AGENT=("-v" "$SSH_AUTH_SOCK:/ssh-agent" "-e" "SSH_AUTH_SOCK=/ssh-agent")
   fi
   [[ "$AUTH_EFFECTIVE" == api-key-env && -n "${ANTHROPIC_API_KEY:-}" ]] && API_ENV=("-e" "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
@@ -251,11 +296,30 @@ launch() {
   # Interactive only when attached to a terminal; keeps `-- command` automation clean.
   local TTY=(-i); [[ -t 0 && -t 1 ]] && TTY=(-i -t)
 
+  # Clean up on any exit (normal, error, signal). Established BEFORE the network is
+  # brought up so a failure after the proxy starts still tears it down. The vars it
+  # reads are global on purpose (correct even after launch() returns) and set -u-safe.
+  cleanup_run() {
+    teardown_network
+    rm -f "${MOUNTS_TMPFILE:-}"
+    if [[ "${cleanup:-}" == yes ]]; then
+      [[ -n "${PROFILE:-}" ]] && rm -rf "$PROFILE"
+    elif [[ -n "${PROFILE:-}" && "${KEEP:-}" == yes ]]; then
+      echo "Kept profile: $PROFILE" >&2
+    fi
+  }
+  trap cleanup_run EXIT
+
+  # Egress isolation (off | none | allowlist). Populates NET_ARGS; starts the proxy
+  # sidecar only on a real allowlist launch (a dry run just describes it).
+  setup_network
+
   local PODMAN_ARGS=(
     run --rm "${TTY[@]}"
     "${NAME_LABEL[@]}"
+    "${NET_ARGS[@]}"
     "${USERNS[@]}" "${USB[@]}" "${DEVICE_MOUNTS[@]}"
-    -v "$PWD:/$DIR_NAME"
+    -v "$PWD:/$DIR_NAME:$WS_MOUNT_MODE"
     "${PROFILE_MOUNT[@]}"
     "${SSH_MOUNT[@]}" "${SSH_AGENT[@]}"
     "${CA_CERT_MOUNT[@]}"
@@ -275,29 +339,24 @@ launch() {
     echo "mode:          $MODE"
     echo "profile:       $PROFILE"
     echo "template:      $TEMPLATE_SOURCE"
-    echo "workspace:     $PWD -> /$DIR_NAME   (enc: $ENC)"
+    echo "workspace:     $PWD -> /$DIR_NAME ($WS_MOUNT_MODE)   (enc: $ENC)"
     echo "trust:         $WS_TRUST    auth: $AUTH_MODE -> $AUTH_EFFECTIVE"
+    if [[ "$NET_MODE" == allowlist ]]; then
+      echo "network:       allowlist (${#NET_ALLOW[@]} rule(s), log=$NET_LOG, mitm=$NET_MITM) via proxy sidecar"
+      printf '  allow:       %s\n' "${NET_ALLOW[@]}"
+    else
+      echo "network:       $NET_MODE"
+    fi
+    echo "sandbox:       confirm_rw=$CONFIRM_RW  ssh=$SANDBOX_SSH"
     [[ "$MODE" == remember ]] && echo "memory store:  $MEMORY_STORE"
     echo "cleanup:       $cleanup"
     echo
     echo "# podman command:"
     printf 'podman'; printf ' %q' "${PODMAN_ARGS[@]}"; echo
     rm -f "$MOUNTS_TMPFILE"
+    trap - EXIT                 # dry run is side-effect-free; skip teardown
     return 0
   fi
-
-  # Run; on any exit (normal, error, or signal), clean up. The vars this reads are
-  # global, so it is correct even after launch() has returned, and every reference is
-  # set -u-safe. A persistent memory store simply keeps whatever the agent wrote.
-  cleanup_run() {
-    rm -f "${MOUNTS_TMPFILE:-}"
-    if [[ "${cleanup:-}" == yes ]]; then
-      [[ -n "${PROFILE:-}" ]] && rm -rf "$PROFILE"
-    elif [[ -n "${PROFILE:-}" && "${KEEP:-}" == yes ]]; then
-      echo "Kept profile: $PROFILE" >&2
-    fi
-  }
-  trap cleanup_run EXIT
 
   # Close the profile lock fd in the podman child so it is not inherited by the
   # container runtime (conmon, fuse-overlayfs). Those daemonize and outlive this
@@ -316,6 +375,7 @@ main() {
     profiles) shift; load_config; cmd_profiles "$@" ;;
     memory)   shift; load_config; cmd_memory "$@" ;;
     doctor)   cmd_doctor ;;
+    report)   shift; load_config; cmd_report "$@" ;;
     build)    shift; cmd_build "$@" ;;
     init)     load_config; handle_init_flag ;;
     *)        launch "$@" ;;

@@ -308,13 +308,16 @@ code and home are both safe." Combined with §10 it closes the remaining escape 
 agentdev offers isolated vs. host networking, plus a third, tighter tier for clean rooms
 and untrusted tasks:
 
-- **`--net=allowlist`** — only an allowlist of destinations is reachable
-  (`api.anthropic.com`, configured package registries, declared git remotes), via a
-  filtering proxy; everything else is refused. This closes the exfiltration path that
-  "isolated filesystem, open network" leaves open.
-- **Egress logging** — the proxy records what the run contacted, so `agentdev report`
-  can show the network footprint alongside the filesystem one. An auditable answer to
+- **`--net=allowlist`** (implemented) — only an allowlist of destinations is reachable,
+  via a filtering proxy sidecar on an internal (no-egress) network; everything else is
+  refused. This closes the exfiltration path that "isolated filesystem, open network"
+  leaves open. Domain-level by default; an opt-in MITM tier filters per-URL. `--net=none`
+  is the fully-offline variant.
+- **Egress logging** (implemented) — the proxy records what the run contacted, and
+  `agentdev report <profile>` shows that network footprint. An auditable answer to
   "where did this agent talk to?"
+- The companion **`--eval`** preset bundles this with confirm-rw, a read-only workspace,
+  api-key auth and no SSH for evaluating skills (see `docs/user-guide.md` §13).
 
 Default remains standard isolated/host networking; the allowlist is opt-in, and the
 natural companion to `--clean --patch-only` for "run this prompt I don't fully trust."

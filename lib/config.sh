@@ -84,4 +84,18 @@ load_config() {
   AUTH_MODE=$(cfg_scalar "auth.mode" "auto")
   WS_ISOLATION=$(cfg_scalar "workspace.isolation" "mount")
   WS_TRUST=$(cfg_scalar "workspace.trust" "skip-permissions")
+
+  # Sandbox / eval policy (all off by default; the --eval preset and per-profile
+  # config turn them on). See docs/user-guide.md "Skill-evaluation sandbox".
+  NET_MODE=$(cfg_scalar "network.mode" "off")         # off | allowlist | none
+  NET_LOG=$(cfg_scalar "network.log" "false")
+  NET_MITM=$(cfg_scalar "network.mitm" "false")
+  NET_ALLOW=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && NET_ALLOW+=("$line")
+  done < <(cfg_list "network.allow")
+
+  CONFIRM_RW=$(cfg_scalar "mounts.confirm_rw" "false")
+  WS_MOUNT_MODE=$(cfg_scalar "mounts.workspace" "rw")  # rw | ro
+  SANDBOX_SSH=$(cfg_scalar "sandbox.ssh" "true")
 }

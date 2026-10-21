@@ -71,6 +71,20 @@ check "host projects not leaked"   "python3 -c \"import json;assert '/x' not in 
 check "noticeCount not leaked"     "python3 -c \"import json;assert 'subscriptionNoticeCount' not in json.load(open('$PJ'))\""
 check "no-account host is tolerated" "printf '%s' '{}' > '$HJ'; source '$REPO/lib/seed.sh'; inherit_host_account '$HJ' '$PJ'"
 
+echo "sandbox / eval:"
+check "proxy allowlist logic"        "python3 '$REPO/tests/test_proxy.py'"
+check "net=none renders --network none" "'$AD' --clean --net=none --dry-run | grep -q -- '--network none'"
+check "workspace-ro renders :ro"     "'$AD' --clean --workspace-ro --dry-run | grep -q ':/ws:ro'"
+check "no-ssh omits ssh mount"       "! '$AD' --clean --no-ssh --dry-run | grep -q '/.ssh:'"
+check "eval preset: allowlist net"   "'$AD' --eval --dry-run | grep -q 'network:.*allowlist'"
+check "eval preset: workspace ro"    "'$AD' --eval --dry-run | grep -q 'workspace:.*(ro)'"
+check "eval preset: confirm+no ssh"  "'$AD' --eval --dry-run | grep -q 'confirm_rw=true  ssh=false'"
+check "eval template lints"          "'$AD' --eval --template '$REPO/templates/skill-eval' --dry-run >/dev/null"
+# confirm_rw_mount decision (non-prompt paths only; the deny path needs a live TTY)
+check "confirm_rw off = allow"       "( CONFIRM_RW=false; RW_ALLOW=(); source '$REPO/lib/config.sh'; source '$REPO/lib/mounts.sh'; confirm_rw_mount /x /y )"
+check "confirm_rw dry-run = allow"   "( CONFIRM_RW=true; DRY_RUN=yes; RW_ALLOW=(); source '$REPO/lib/config.sh'; source '$REPO/lib/mounts.sh'; confirm_rw_mount /x /y )"
+check "confirm_rw --rw-allow = allow" "( CONFIRM_RW=true; DRY_RUN=no; RW_ALLOW=('$T/ref'); source '$REPO/lib/config.sh'; source '$REPO/lib/mounts.sh'; confirm_rw_mount '$T/ref' /y )"
+
 echo "management:"
 check "profiles ls shows p1"      "'$AD' profiles ls | grep -qx p1"
 check "profiles fork"             "'$AD' profiles fork p1 p2"

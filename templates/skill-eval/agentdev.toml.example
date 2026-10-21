@@ -1,0 +1,26 @@
+# Example agentdev config for a skill-evaluation harness directory.
+# Place this as ./.agentdev.toml in the directory you launch the eval from.
+# `agentdev --eval` sets equivalent defaults; this spells them out and lets you
+# tune the allowlist.
+
+[template]
+source = "~/src/agentdev/templates/skill-eval"   # the eval seed template
+
+[auth]
+mode = "api-key-env"                              # headless; no subscription connectors
+
+[workspace]
+trust = "workspace-only"
+
+[network]
+mode  = "allowlist"
+allow = ["api.anthropic.com"]                     # keep MINIMAL; add only what a skill truly needs
+log   = true                                      # record egress for `agentdev report`
+# mitm = true                                     # tier 3: per-URL (path) filtering of HTTPS
+
+[mounts]
+confirm_rw = true                                 # prompt before every read-write mount
+workspace  = "ro"                                 # skills can't mutate the harness
+
+[sandbox]
+ssh = false                                       # no host SSH keys / agent

@@ -93,7 +93,9 @@ cmd_profiles() {
           echo "gc: profile container $cid ($ppath) is active; left running" >&2
         fi
       done < <(podman ps -a --filter 'label=agentdev.profile' \
-                 --format '{{.ID}} {{index .Labels "agentdev.profile"}}' 2>/dev/null) ;;
+                 --format '{{.ID}} {{index .Labels "agentdev.profile"}}' 2>/dev/null)
+      # Reap egress proxy sidecars and networks left by crashed allowlist runs.
+      gc_networks ;;
     *) echo "Usage: agentdev profiles ls|show|new|rm|fork|gc [args]" >&2; return 1 ;;
   esac
 }

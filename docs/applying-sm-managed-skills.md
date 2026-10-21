@@ -1,6 +1,6 @@
 # Applying sm-managed skills to an agentdev profile
 
-[`sm`](https://github.com/brightsign-playground/sm) (skills-mapper) manages a
+[`sm`](https://github.com/gherlein/sm) (skills-mapper) manages a
 single, agent-neutral **canonical store** of skills and places them into each
 agent's own skills directory. agentdev runs an agent whose home is a **profile
 folder**. This document shows how the two compose: how skills that `sm` manages

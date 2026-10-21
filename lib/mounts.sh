@@ -85,8 +85,43 @@ _mount() {
   MOUNTS_CONTENT+="$src -> ${target} (${label})\n"
 }
 
+# confirm_rw_mount HOST TARGET - gate a read-write mount. Prints nothing and
+# returns 0 (allow) unless CONFIRM_RW=true. When confirming: a HOST matching an
+# entry in RW_ALLOW (resolved) is auto-approved; otherwise prompt on /dev/tty; a
+# run with no controlling terminal denies (fail-closed) so unattended/eval runs
+# cannot silently gain write access. Returns 1 to deny.
+confirm_rw_mount() {
+  [[ "${CONFIRM_RW:-false}" == true ]] || return 0
+  [[ "${DRY_RUN:-no}" == yes ]] && return 0   # --dry-run must not prompt
+  local host="$1" target="$2" entry resolved_host resolved_entry ans
+  resolved_host=$(realpath "$host" 2>/dev/null || printf '%s' "$host")
+  for entry in "${RW_ALLOW[@]:-}"; do
+    [[ -z "$entry" ]] && continue
+    resolved_entry=$(realpath "$(expand_tilde "$entry")" 2>/dev/null || printf '%s' "$entry")
+    if [[ "$resolved_entry" == "$resolved_host" ]]; then
+      echo "rw mount pre-approved (--rw-allow): $resolved_host -> $target" >&2
+      return 0
+    fi
+  done
+  if [[ -r /dev/tty && -w /dev/tty ]]; then
+    printf 'Allow READ-WRITE mount  %s -> %s ? [y/N] ' "$resolved_host" "$target" > /dev/tty
+    read -r ans < /dev/tty || ans=""
+    case "$ans" in
+      [yY]|[yY][eE][sS]) return 0 ;;
+      *) echo "rw mount denied: $resolved_host -> $target" >&2; return 1 ;;
+    esac
+  fi
+  echo "Refusing read-write mount (no terminal to confirm; fail-closed): $resolved_host -> $target" >&2
+  echo "       pre-approve with '--rw-allow $resolved_host', or mount it read-only." >&2
+  return 1
+}
+
 add_ro_mount() { local p; p=$(resolve_path "$1") || return 1; _mount "$p" "/external/$(basename "$p")" ro "CLI/env ro mount of $p"; }
-add_rw_mount() { local p; p=$(resolve_path "$1") || return 1; _mount "$p" "/external/$(basename "$p")" rw "CLI/env rw mount of $p"; }
+add_rw_mount() {
+  local p; p=$(resolve_path "$1") || return 1
+  confirm_rw_mount "$p" "/external/$(basename "$p")" || return 0
+  _mount "$p" "/external/$(basename "$p")" rw "CLI/env rw mount of $p"
+}
 
 # _process_cli_mounts ARGS... - returns only the leftover (non-mount) args via
 # the global CLI_LEFTOVER array, so the launcher can keep flags it owns.
@@ -137,6 +172,7 @@ _process_file_mounts() {
       [[ -z "$src" ]] && continue
       rsrc=$(resolve_path "$(expand_tilde "$src")") || { ((MOUNT_ERRORS++)); continue; }
       target=$(_resolve_dest "$workspace" "$rsrc" "$dest")
+      [[ "$mode" == rw ]] && { confirm_rw_mount "$rsrc" "$target" || continue; }
       _mount "$rsrc" "$target" "$mode" "$MOUNT_FILE_NAME [$table] $src"
     done < <(python3 "$LIBDIR/toml.py" table "$MOUNT_FILE_NAME" "$table" 2>/dev/null)
   done

@@ -143,7 +143,7 @@ For fanning this out across many tasks in parallel, see
 ### Skills from a shared store
 
 A profile's `.claude/skills/` is a first-class, mounted part of its home, so you
-can populate it from [`sm`](https://github.com/brightsign-playground/sm)'s
+can populate it from [`sm`](https://github.com/gherlein/sm)'s
 canonical skill store and the agent in the container reads those skills as its
 own:
 
@@ -154,6 +154,21 @@ agentdev --profile research -- claude --dangerously-skip-permissions -p "…"
 
 See [`docs/applying-sm-managed-skills.md`](./docs/applying-sm-managed-skills.md)
 for the full integration (why `--copy`, the two skill channels, and lifecycle).
+
+### Skill-evaluation sandbox
+
+To evaluate skills in a locked-down agent — no network except an allowlist, every
+read-write mount confirmed, a read-only workspace, no host SSH — use `--eval`:
+
+```bash
+agentdev --eval --profile skill-eval -- \
+  claude --dangerously-skip-permissions -p "use the available skills to do X"
+agentdev report skill-eval          # audit what the run reached on the network
+```
+
+Provision the skills under test with `sm sync --copy --agent-home <profile>`. Full
+details (the allowlist proxy, per-URL MITM tier, confirming mounts, the egress
+report) are in [`docs/user-guide.md` §13](./docs/user-guide.md#13-skill-evaluation-sandbox).
 
 ## Management
 
