@@ -7,7 +7,7 @@ PREFIX     ?= $(HOME)/.local
 BINDIR     := $(PREFIX)/bin
 
 SHELLS  := agentdev $(wildcard lib/*.sh) image/entrypoint.sh tests/smoke.sh
-PYFILES := lib/toml.py
+PYFILES := lib/toml.py image/proxy.py tests/matrix.py tests/test_proxy.py
 
 .DEFAULT_GOAL := help
 
@@ -20,9 +20,22 @@ build: ## Build the container image (IMAGE, GO_VERSION overridable)
 	podman build --format docker --build-arg GO_VERSION=$(GO_VERSION) \
 	  -t $(IMAGE) -f image/Containerfile image/
 
+.PHONY: push
+push: ## Push IMAGE to its registry (run `podman login ghcr.io` first)
+	podman push $(IMAGE)
+
+.PHONY: digest
+digest: ## Print IMAGE's pin-by-digest reference (set it as the default IMAGE)
+	@podman inspect --format '{{index .RepoDigests 0}}' $(IMAGE)
+
 .PHONY: test
-test: ## Run the offline smoke suite
+test: ## Run the offline suite: smoke + option-permutation matrix (docs/testing-plan.md)
 	./tests/smoke.sh
+	python3 ./tests/matrix.py
+
+.PHONY: matrix
+matrix: ## Run just the profile-option permutation matrix (offline, dry-run based)
+	python3 ./tests/matrix.py
 
 .PHONY: lint
 lint: ## Syntax-check shell + python (uses shellcheck if installed)

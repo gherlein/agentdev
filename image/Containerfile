@@ -180,5 +180,9 @@ ENV PATH="${PATH}:/home/developer/bin"
 USER root
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
+# The egress allowlist proxy (lib/net.sh runs it in a sidecar from this image, so
+# it is version-locked to the image digest and needs no host-side copy).
+COPY proxy.py /usr/local/bin/agentdev-proxy.py
+RUN chmod +x /usr/local/bin/agentdev-proxy.py
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["bash"]

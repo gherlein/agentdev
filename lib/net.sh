@@ -14,7 +14,7 @@
 # Sets NET_ARGS (podman args for the agent container). Records PROXY_NAME /
 # NET_INT / NET_EXT / NET_WORKDIR for teardown_network. Requires: podman,
 # sha256sum, openssl (only for MITM); globals NET_MODE NET_ALLOW[] NET_LOG
-# NET_MITM IMAGE RUN_ID PROFILE SELFDIR DRY_RUN.
+# NET_MITM IMAGE RUN_ID PROFILE DRY_RUN.
 
 NET_ARGS=()
 PROXY_NAME=""; NET_INT=""; NET_EXT=""; NET_WORKDIR=""; EGRESS_LOG=""
@@ -67,8 +67,9 @@ setup_network() {
   printf '%s\n' "${NET_ALLOW[@]}" > "$allow_file"
 
   local proxy_env=(-e PROXY_ALLOW_FILE=/etc/agentdev/allow.txt -e PROXY_PORT=8080)
+  # proxy.py is baked into the image (/usr/local/bin/agentdev-proxy.py), so the
+  # sidecar is self-contained and pinned to the image digest — no host copy.
   local proxy_vols=(
-    -v "$SELFDIR/image/proxy.py:/proxy.py:ro"
     -v "$allow_file:/etc/agentdev/allow.txt:ro"
     -v "$PROFILE:/hostprofile:rw"
   )
@@ -87,7 +88,7 @@ setup_network() {
   podman network create          --label "agentdev.net=$id" "$NET_EXT" >/dev/null
   if ! podman run -d --name "$PROXY_NAME" --label "agentdev.proxy=$PROFILE" --label "agentdev.net=$id" \
          --network "$NET_INT" --network "$NET_EXT" \
-         "${proxy_vols[@]}" "${proxy_env[@]}" "$IMAGE" python3 /proxy.py >/dev/null; then
+         "${proxy_vols[@]}" "${proxy_env[@]}" "$IMAGE" python3 /usr/local/bin/agentdev-proxy.py >/dev/null; then
     echo "Error: failed to start egress proxy sidecar." >&2
     teardown_network
     exit 1
