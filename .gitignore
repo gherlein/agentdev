@@ -1,5 +1,3 @@
-# Local, host-specific mount file (per DESIGN §5: absolute host paths don't belong in git)
-.agentdev-mounts.toml
 *.output
 __pycache__/
 *.pyc

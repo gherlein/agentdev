@@ -9,18 +9,23 @@ AD="$REPO/agentdev"
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); echo "  ok    $1"; }
 bad()  { FAIL=$((FAIL+1)); echo "  FAIL  $1"; }
-check(){ if eval "$2" >/dev/null 2>&1; then ok "$1"; else bad "$1"; fi; }
+# Run each probe with pipefail OFF: a check is `producer | grep -q PAT`, where grep
+# exits on its first match and closes the pipe, so the producer can take SIGPIPE
+# before it finishes writing. Under the script's `set -o pipefail` that SIGPIPE
+# would fail the pipeline even though grep matched (flaky for early-line matches).
+check(){ if ( set +o pipefail; eval "$2" ) >/dev/null 2>&1; then ok "$1"; else bad "$1"; fi; }
+# dryq PATTERN [ARGS...] - true if a --dry-run's output matches PATTERN. Captures
+# the output first, so an early grep -q match can't SIGPIPE the launcher.
+dryq() { local pat="$1"; shift; local out; out="$("$AD" "$@" --dry-run 2>/dev/null)"; grep -q -- "$pat" <<<"$out"; }
 
 T="$(mktemp -d /tmp/agentdev-smoke.XXXX)"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/home" "$T/ws" "$T/ref"
-cat > "$T/home/config.toml" <<EOF
-[profile]
-profiles_root = "$T/profiles"
-clean_root    = "$T/clean"
-memory_root   = "$T/memory"
-[template]
-source = "$REPO/templates/default"
+cat > "$T/home/config.json" <<EOF
+{
+  "profile": { "profiles_root": "$T/profiles", "clean_root": "$T/clean", "memory_root": "$T/memory" },
+  "template": { "source": "$REPO/templates/default" }
+}
 EOF
 export AGENTDEV_HOME="$T/home" ANTHROPIC_API_KEY=dummy
 cd "$T/ws"
@@ -29,7 +34,7 @@ echo "syntax:"
 for f in "$AD" "$REPO"/lib/*.sh "$REPO"/image/entrypoint.sh; do
   check "bash -n $(basename "$f")" "bash -n '$f'"
 done
-check "python compiles toml.py" "python3 -m py_compile '$REPO/lib/toml.py'"
+check "python compiles jsoncfg.py" "python3 -m py_compile '$REPO/lib/jsoncfg.py'"
 
 echo "cli:"
 check "--help"            "'$AD' --help"
@@ -91,17 +96,59 @@ check "profiles fork"             "'$AD' profiles fork p1 p2"
 check "forked profile exists"     "test -d '$T/profiles/p2'"
 check "memory new + ls"           "'$AD' memory new m1 && '$AD' memory ls | grep -qx m1"
 check "memory store is plain dir" "! test -d '$T/memory/m1/.git'"
-check "init writes mounts file"   "'$AD' init && test -f .agentdev-mounts.toml"
+check "init writes config file"   "'$AD' init && test -f agentdev-config.json && python3 -c \"import json;json.load(open('agentdev-config.json'))\""
+check "init refuses overwrite"    "! '$AD' init 2>/dev/null"
+rm -f agentdev-config.json
 
 echo "mounts:"
-cat > .agentdev-mounts.toml <<EOF
-[read-only]
-"$T/ref" = "/external/ref"
+check "cli -ro renders"           "dryq '$T/ref:/external/ref:ro' --clean -ro '$T/ref'"
+check "cli -rw renders"           "dryq '$T/ref:/external/ref:rw' --clean -rw '$T/ref'"
+cat > agentdev-config.json <<EOF
+{ "mounts": { "read_only": { "$T/ref": "/external/cfgref" } } }
 EOF
-check "file mount renders"        "'$AD' --clean --dry-run | grep -q '$T/ref:/external/ref:ro'"
-check "cli -rw renders"           "'$AD' --clean -rw '$T/ref' --dry-run 2>/dev/null | grep -q '/external/ref:rw' || true; '$AD' --clean --dry-run | grep -q external"
-rm -f .agentdev-mounts.toml
+check "config mount renders"      "dryq '$T/ref:/external/cfgref:ro' --clean"
+rm -f agentdev-config.json
 check "collision is fatal"        "! '$AD' --clean -ro '$T/ref' -ro '$T/ref' --dry-run 2>/dev/null"
+
+echo "json config:"
+mkdir -p "$T/ws/sub"
+cat > agentdev-config.json <<EOF
+{
+  "profile": { "default_mode": "profile", "name": "jp", "profiles_root": "$T/profiles",
+               "clean_root": "$T/clean", "memory_root": "$T/memory" },
+  "template": { "source": "$REPO/templates/default" },
+  "workspace": { "trust": "workspace-only", "workdir": "sub" },
+  "network": { "mode": "none" },
+  "mounts": { "read_only": { "$T/ref": "/external/jref" } }
+}
+EOF
+check "default ./agentdev-config.json read" "dryq 'profile:.*/profiles/jp'"
+check "config drives mode"         "dryq 'mode:.*profile'"
+check "config drives trust"        "dryq 'trust:.*workspace-only'"
+check "config drives network"      "dryq 'network:.*none'"
+check "entry folder from config"   "dryq 'entry folder:  /ws/sub'"
+check "entry folder sets -w"       "dryq '[-]w /ws/sub'"
+check "entry folder sets env"      "dryq 'AGENTDEV_WORKDIR=/ws/sub'"
+check "json mount renders"         "dryq '$T/ref:/external/jref:ro'"
+check "CLI mode wins over config"  "dryq 'mode:.*clean' --clean"
+check "CLI --workdir wins"         "dryq 'entry folder:  /ws$' --workdir ."
+check "-c explicit path"           "dryq '/profiles/jp' -c '$T/ws/agentdev-config.json'"
+check "bad entry folder is fatal"  "! '$AD' --workdir nope --dry-run 2>/dev/null"
+check "missing -c file is fatal"   "! '$AD' -c '$T/no-such.json' --dry-run 2>/dev/null"
+check "invalid json is fatal"      "printf '{bad' > bad.json; ! '$AD' -c bad.json --dry-run 2>/dev/null"
+rm -f agentdev-config.json bad.json
+# Project config overrides the user config (~/.agentdev/config.json) for a key.
+cat > "$T/home/config.json" <<EOF
+{ "profile": { "profiles_root": "$T/profiles", "clean_root": "$T/clean", "memory_root": "$T/memory" },
+  "template": { "source": "$REPO/templates/default" },
+  "workspace": { "trust": "skip-permissions" } }
+EOF
+check "user config applies"           "dryq 'trust:.*skip-permissions' --clean"
+cat > agentdev-config.json <<EOF
+{ "workspace": { "trust": "prompt" } }
+EOF
+check "project config overrides user" "dryq 'trust:.*prompt' --clean"
+rm -f agentdev-config.json
 
 echo
 echo "RESULT: $PASS passed, $FAIL failed"

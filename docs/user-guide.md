@@ -45,7 +45,7 @@ yourself if you want history.
 
 ## 2. Install and requirements
 
-Requirements: **podman**, **python3 3.11+** (for `tomllib`), and **Linux** (for
+Requirements: **podman**, **python3**, and **Linux** (for
 `--userns=keep-id` ownership mapping; macOS works via a podman machine).
 
 ```bash
@@ -169,27 +169,34 @@ agentdev --clean /dev/ttyUSB0            # /dev/* = device passthrough
 ```
 
 `-ro`/`-rw` are repeatable and mixable. A CLI mount always appears inside at
-`/external/<basename>` — the CLI form cannot choose the destination (use the TOML
-file for that). A bare path must be an existing directory.
+`/external/<basename>` — the CLI form cannot choose the destination (use the config
+maps for that). A bare path must be an existing directory.
 
-### b. `.agentdev-mounts.toml` (per project, committable)
+### b. `mounts.read_only` / `mounts.read_write` in the config (committable)
 
-A file by that name **in the launch directory** applies on every launch there.
-Scaffold it with `agentdev init`. Format is `source = destination`:
+The `mounts` group of `./agentdev-config.json` (or `~/.agentdev/config.json`) applies
+on every launch. Scaffold a starter config with `agentdev init`. Each is a
+`"source": "destination"` map:
 
-```toml
-[read-only]
-"~/ref/standards" = "/external/standards"   # absolute container path
-"../sibling-repo" = "&"                      # "&" → basename at root → /sibling-repo
-
-[read-write]
-"~/out/shared"    = "shared"                 # relative → under workspace → /<dirname>/shared
+```json
+{
+  "mounts": {
+    "read_only": {
+      "~/ref/standards": "/external/standards",   // absolute container path
+      "../sibling-repo": "&"                        // "&" → basename at root → /sibling-repo
+    },
+    "read_write": {
+      "~/out/shared": "shared"                      // relative → under workspace → /<dirname>/shared
+    }
+  }
+}
 ```
 
 Destination rules: absolute → used literally; `"&"` → the source basename at the
 container root; relative → under the workspace. Sources accept `~` and `$VAR`.
-Relative sources and `"&"` are portable (safe to commit); absolute host paths
-should stay gitignored. A syntax error in this file aborts the launch.
+Relative sources and `"&"` are portable (safe to commit in the project config);
+host-specific absolute paths belong in `~/.agentdev/config.json`. An invalid config
+aborts the launch.
 
 Two things about relative paths:
 
@@ -345,22 +352,24 @@ sm sync --copy --store ~/eval-skills --agent-home ~/.agentdev/profiles/skill-eva
 
 ### Tuning it with config instead of the preset
 
-Spell the policy out in the harness directory's `./.agentdev.toml` (a ready
-example ships at `templates/skill-eval/agentdev.toml.example`):
+Spell the policy out in the harness directory's `./agentdev-config.json` (a ready
+example ships at `templates/skill-eval/agentdev-config.json.example`):
 
-```toml
-[network]
-mode  = "allowlist"
-allow = ["api.anthropic.com", "registry.npmjs.org:443"]   # keep MINIMAL
-log   = true
-# mitm = true     # tier 3: per-URL (path) filtering of HTTPS — see below
-
-[mounts]
-confirm_rw = true
-workspace  = "ro"
-
-[sandbox]
-ssh = false
+```json
+{
+  "network": {
+    "mode":  "allowlist",
+    "allow": ["api.anthropic.com", "registry.npmjs.org:443"],
+    "log":   true
+  },
+  "mounts": {
+    "workspace":  "ro",
+    "confirm_rw": true
+  },
+  "sandbox": {
+    "ssh": false
+  }
+}
 ```
 
 Allowlist entries are `host`, `host:port`, `*.wildcard.host`, or `host/path/prefix`
@@ -431,54 +440,65 @@ agentdev report skill-eval
 
 ## 14. Configuration
 
-Resolution order, first found wins per key (CLI flags, applied after, always win):
+All configuration is JSON. Resolution order, first found wins per key (CLI flags,
+applied after, always win):
 
-1. `./.agentdev.toml` (per project, committable)
-2. `~/.agentdev/config.toml` (user; honors `AGENTDEV_HOME`)
+1. `./agentdev-config.json` (per project, committable) — or any path given with `-c/--config`
+2. `~/.agentdev/config.json` (user; honors `AGENTDEV_HOME`)
 3. built-in defaults
 
-Full schema with built-in defaults:
+Keys are grouped and ordered the same everywhere. Full schema with built-in defaults
+(every key optional; `//` comments are for the docs only — JSON has none):
 
-```toml
-[agent]
-name  = "claude"
-image = "ghcr.io/gherlein/agentdev:latest"      # pin by @sha256:… for reproducibility
-
-[profile]
-profiles_root = "~/.agentdev/profiles"
-clean_root    = "~/.cache/agentdev/clean"
-memory_root   = "~/.agentdev/memory"
-default_mode  = "clean"                          # clean | remember | profile
-
-[template]
-source   = "<install-dir>/templates/default"
-strategy = "copy"
-include  = ["CLAUDE.md", "settings.json", "hooks", "skills", ".mcp.json"]
-
-[auth]
-mode = "auto"                                    # auto | api-key-env | interactive | inherit-credentials
-
-[workspace]
-isolation = "mount"
-trust     = "skip-permissions"                   # skip-permissions | workspace-only | prompt
-
-# Sandbox / skill-evaluation policy (all off by default; see §13):
-[network]
-mode  = "off"                                    # off | allowlist | none
-allow = []                                       # host | host:port | *.host | host/path (for allowlist)
-log   = false                                    # record egress for `agentdev report`
-mitm  = false                                    # tier 3: per-URL HTTPS filtering (needs openssl)
-
-[mounts]
-confirm_rw = false                               # prompt before every read-write mount
-workspace  = "rw"                                # rw | ro
-
-[sandbox]
-ssh = true                                       # mount host SSH keys / agent
+```json
+{
+  "agent": {
+    "name":  "claude",
+    "image": "ghcr.io/gherlein/agentdev:latest"    // pin by @sha256:… for reproducibility
+  },
+  "profile": {
+    "default_mode":  "clean",                       // clean | remember | profile
+    "name":          "",                            // profile mode: which named profile (else --profile)
+    "memory_store":  "default",                     // remember mode: which store (else --remember <store>)
+    "keep":          false,                          // clean mode: retain the profile (like --keep)
+    "profiles_root": "~/.agentdev/profiles",
+    "clean_root":    "~/.cache/agentdev/clean",
+    "memory_root":   "~/.agentdev/memory"
+  },
+  "template": {
+    "source":   "<install-dir>/templates/default",
+    "strategy": "copy",
+    "include":  ["CLAUDE.md", "settings.json", "hooks", "skills", ".mcp.json"]
+  },
+  "auth": {
+    "mode": "auto"                                  // auto | api-key-env | interactive | inherit-credentials
+  },
+  "workspace": {
+    "isolation": "mount",
+    "trust":     "skip-permissions",                // skip-permissions | workspace-only | prompt
+    "workdir":   ""                                 // entry folder (bash cwd); relative to workspace, or absolute; ""/"." = root
+  },
+  "network": {                                      // sandbox / skill-eval policy (all off by default; see §13)
+    "mode":  "off",                                 // off | allowlist | none
+    "allow": [],                                    // host | host:port | *.host | host/path (for allowlist)
+    "log":   false,                                 // record egress for `agentdev report`
+    "mitm":  false                                  // tier 3: per-URL HTTPS filtering (needs openssl)
+  },
+  "mounts": {
+    "workspace":  "rw",                             // rw | ro
+    "confirm_rw": false,                            // prompt before every read-write mount
+    "rw_allow":   [],                               // pre-approve rw mounts under confirm_rw (like --rw-allow)
+    "read_only":  {},                               // "host-src": "dest"  (see §12b)
+    "read_write": {}
+  },
+  "sandbox": {
+    "ssh": true                                     // mount host SSH keys / agent
+  }
+}
 ```
 
 A config file that fails to parse aborts the launch (fail-closed). `agentdev init`
-(no relation to config) writes a starter `.agentdev-mounts.toml`, not this file.
+writes a starter `./agentdev-config.json` in the launch directory.
 
 ## 15. Reproducibility
 
@@ -522,7 +542,7 @@ Subcommands:
   memory    ls | new <name> | rm <name>
   report <profile>   show a profile's egress log (from --net=allowlist)
   doctor    check the environment
-  init      write a starter .agentdev-mounts.toml
+  init      write a starter ./agentdev-config.json
   build     build the agentdev image locally
 ```
 

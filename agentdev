@@ -22,6 +22,10 @@ usage() {
   cat <<'EOF'
 Usage: agentdev [MODE] [OPTIONS] [MOUNT-ARGS...] [-- COMMAND...]
 
+Config:
+  -c, --config <path>   JSON config file (default: ./agentdev-config.json if present).
+                        Every option below has a matching, grouped key; CLI wins.
+
 Modes (default from config; built-in default: --clean):
   --clean               fresh throwaway profile, discarded on exit
   --remember [store]    clean home + a persistent memory store (default: "default")
@@ -32,6 +36,8 @@ Options:
   --auth <mode>         api-key-env | interactive  (override config)
   --login               shorthand for --auth interactive (Claude Pro/Max subscription)
   --trust <mode>        skip-permissions | workspace-only | prompt
+  --workdir <path>      entry folder: where the container shell starts (bash cwd).
+                        Relative to the workspace, or an absolute container path.
   --keep                clean mode: keep the profile and print its path
   --reseed              re-apply template config over an existing profile
   --dry-run             print the settled plan and the podman command; do not launch
@@ -51,7 +57,7 @@ Subcommands:
   memory    ls|new|rm
   report <profile>              show a profile's egress log (from --net=allowlist)
   doctor                        check the environment
-  init                          write a starter .agentdev-mounts.toml
+  init                          write a starter ./agentdev-config.json
   build                         build the agentdev image locally
 EOF
 }
@@ -63,7 +69,7 @@ cmd_doctor() {
   check() { if eval "$2" >/dev/null 2>&1; then echo "  ok    $1"; else echo "  FAIL  $1"; ok=1; fi; }
   echo "agentdev doctor:"
   check "podman present"            "command -v podman"
-  check "python3 + tomllib"         "python3 -c 'import tomllib'"
+  check "python3 present"           "command -v python3"
   check "image present ($IMAGE)"    "podman image exists '$IMAGE'"
   check "template readable ($TEMPLATE_SOURCE)" "test -d '$TEMPLATE_SOURCE'"
   if [[ "$AUTH_MODE" == "api-key-env" ]]; then
@@ -89,7 +95,8 @@ cmd_build() {
 launch() {
   # MODE, KEEP, cleanup, PROFILE, RUN_ID, MEMORY_STORE, MOUNTS_TMPFILE are global on
   # purpose: the EXIT trap reads them after this function has already returned.
-  local MEMORY_NAME="default" TEMPLATE_OVERRIDE="" TRUST_OVERRIDE="" AUTH_OVERRIDE=""
+  local MEMORY_NAME_CLI="" PROFILE_NAME_CLI="" KEEP_CLI="" WORKDIR_OVERRIDE=""
+  local TEMPLATE_OVERRIDE="" TRUST_OVERRIDE="" AUTH_OVERRIDE=""
   local RESEED=no DRY_RUN=no
   local MOUNT_ARGS=() COMMAND=()
   local NET_OVERRIDE="" WS_MODE_OVERRIDE="" SSH_OVERRIDE="" CONFIRM_RW_OVERRIDE="" EVAL_PRESET=no
@@ -102,14 +109,16 @@ launch() {
       --remember)
         MODE=remember
         if [[ -n "${2:-}" && "$2" != -* && "$2" != /dev/* && ! -d "$2" ]]; then
-          MEMORY_NAME="$2"; shift
+          MEMORY_NAME_CLI="$2"; shift
         fi ;;
-      --profile)  MODE=profile; MEMORY_NAME=""; PROFILE_NAME="${2:?--profile needs a name}"; shift ;;
+      --profile)  MODE=profile; PROFILE_NAME_CLI="${2:?--profile needs a name}"; shift ;;
       --template) TEMPLATE_OVERRIDE="${2:?--template needs a path}"; shift ;;
       --trust)    TRUST_OVERRIDE="${2:?--trust needs a mode}"; shift ;;
       --auth)     AUTH_OVERRIDE="${2:?--auth needs a mode}"; shift ;;
       --login)    AUTH_OVERRIDE="interactive" ;;
-      --keep)     KEEP=yes ;;
+      --workdir)  WORKDIR_OVERRIDE="${2:?--workdir needs a path}"; shift ;;
+      --workdir=*) WORKDIR_OVERRIDE="${1#--workdir=}" ;;
+      --keep)     KEEP_CLI=yes ;;
       --reseed)   RESEED=yes ;;
       --dry-run)  DRY_RUN=yes ;;
       --eval)         EVAL_PRESET=yes ;;
@@ -145,6 +154,57 @@ launch() {
   [[ -n "$TEMPLATE_OVERRIDE" ]] && TEMPLATE_SOURCE="$(expand_tilde "$TEMPLATE_OVERRIDE")"
   [[ -n "$TRUST_OVERRIDE" ]] && WS_TRUST="$TRUST_OVERRIDE"
   [[ -n "$AUTH_OVERRIDE" ]] && AUTH_MODE="$AUTH_OVERRIDE"
+
+  # Resolve the profile name / memory store for the settled mode (CLI wins over
+  # config). PROFILE_NAME and MEMORY_NAME are consumed by the mode switch below.
+  local MEMORY_NAME="default"
+  PROFILE_NAME="${PROFILE_NAME:-}"
+  case "$MODE" in
+    profile)
+      PROFILE_NAME="${PROFILE_NAME_CLI:-$CFG_PROFILE_NAME}"
+      if [[ -z "$PROFILE_NAME" ]]; then
+        echo "Error: profile mode needs a name: pass --profile <name> or set profile.name in the config." >&2
+        exit 1
+      fi ;;
+    remember)
+      MEMORY_NAME="${MEMORY_NAME_CLI:-${CFG_MEMORY_STORE:-default}}" ;;
+  esac
+
+  # --keep wins; otherwise honor profile.keep from config (clean mode only).
+  if [[ -n "$KEEP_CLI" ]]; then KEEP=yes
+  elif [[ "$CFG_KEEP" == true ]]; then KEEP=yes; fi
+
+  # Union the config's pre-approved rw mounts with any --rw-allow flags (CLI last).
+  local _rwa=()
+  [[ ${#CFG_RW_ALLOW[@]} -gt 0 ]] && _rwa+=("${CFG_RW_ALLOW[@]}")
+  [[ ${#RW_ALLOW[@]} -gt 0 ]] && _rwa+=("${RW_ALLOW[@]}")
+  RW_ALLOW=(); [[ ${#_rwa[@]} -gt 0 ]] && RW_ALLOW=("${_rwa[@]}")
+
+  # The entry folder (bash cwd): CLI --workdir wins over workspace.workdir in config.
+  [[ -n "$WORKDIR_OVERRIDE" ]] && WS_WORKDIR="$WORKDIR_OVERRIDE"
+
+  # Resolve the container working directory. Empty or "." = the workspace root
+  # (/<DIR_NAME>); a relative path resolves under it; an absolute path is used as
+  # given. When the target lives inside the workspace mount we can (and do) verify
+  # it exists on the host, so a typo fails before the container starts.
+  local CONTAINER_WORKDIR="/$DIR_NAME" wd="${WS_WORKDIR#./}"
+  wd="${wd%/}"
+  if [[ -n "$wd" && "$wd" != "." ]]; then
+    case "$wd" in
+      /*) CONTAINER_WORKDIR="$wd" ;;
+      *)  CONTAINER_WORKDIR="/$DIR_NAME/$wd" ;;
+    esac
+  fi
+  case "$CONTAINER_WORKDIR" in
+    "/$DIR_NAME"|"/$DIR_NAME/"*)
+      local rel="${CONTAINER_WORKDIR#"/$DIR_NAME"}"; rel="${rel#/}"
+      local host_wd="$PWD${rel:+/$rel}"
+      if [[ ! -d "$host_wd" ]]; then
+        echo "Error: entry folder does not exist: $host_wd" >&2
+        echo "       (workspace.workdir/--workdir = '$WS_WORKDIR'; create it or fix the path)." >&2
+        exit 1
+      fi ;;
+  esac
 
   # Sandbox-policy CLI overrides (win over config).
   [[ -n "$NET_OVERRIDE" ]] && NET_MODE="$NET_OVERRIDE"
@@ -315,7 +375,7 @@ launch() {
   setup_network
 
   local PODMAN_ARGS=(
-    run --rm "${TTY[@]}"
+    run --rm --pull=missing "${TTY[@]}"
     "${NAME_LABEL[@]}"
     "${NET_ARGS[@]}"
     "${USERNS[@]}" "${USB[@]}" "${DEVICE_MOUNTS[@]}"
@@ -329,7 +389,8 @@ launch() {
     -e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)"
     -e "HOST_HOME=$HOME" -e "HOST_USER=$(id -un)"
     -e "WORKSPACE=/$DIR_NAME"
-    -w "/$DIR_NAME"
+    -e "AGENTDEV_WORKDIR=$CONTAINER_WORKDIR"
+    -w "$CONTAINER_WORKDIR"
     "$IMAGE"
   )
   if [[ ${#COMMAND[@]} -gt 0 ]]; then PODMAN_ARGS+=("${COMMAND[@]}"); else PODMAN_ARGS+=(bash); fi
@@ -340,6 +401,7 @@ launch() {
     echo "profile:       $PROFILE"
     echo "template:      $TEMPLATE_SOURCE"
     echo "workspace:     $PWD -> /$DIR_NAME ($WS_MOUNT_MODE)   (enc: $ENC)"
+    echo "entry folder:  $CONTAINER_WORKDIR"
     echo "trust:         $WS_TRUST    auth: $AUTH_MODE -> $AUTH_EFFECTIVE"
     if [[ "$NET_MODE" == allowlist ]]; then
       echo "network:       allowlist (${#NET_ALLOW[@]} rule(s), log=$NET_LOG, mitm=$NET_MITM) via proxy sidecar"
@@ -369,7 +431,29 @@ launch() {
   fi
 }
 
+# extract_config_flag - pull -c/--config out of the arg stream (from any position)
+# so it applies uniformly to every command and subcommand. Sets the JSON_CONFIG /
+# JSON_CONFIG_EXPLICIT globals that config.sh reads, and returns the remaining args
+# via the CLEAN_ARGS global.
+extract_config_flag() {
+  CLEAN_ARGS=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --)          CLEAN_ARGS+=("$@"); break ;;   # stop at the command passthrough
+      -c|--config) JSON_CONFIG="$(expand_tilde "${2:?-c/--config needs a path}")"; JSON_CONFIG_EXPLICIT=yes; shift ;;
+      --config=*)  JSON_CONFIG="$(expand_tilde "${1#--config=}")"; JSON_CONFIG_EXPLICIT=yes ;;
+      -c=*)        JSON_CONFIG="$(expand_tilde "${1#-c=}")"; JSON_CONFIG_EXPLICIT=yes ;;
+      *)           CLEAN_ARGS+=("$1") ;;
+    esac
+    shift
+  done
+}
+
 main() {
+  JSON_CONFIG="./agentdev-config.json"; JSON_CONFIG_EXPLICIT=no
+  extract_config_flag "$@"
+  if [[ ${#CLEAN_ARGS[@]} -gt 0 ]]; then set -- "${CLEAN_ARGS[@]}"; else set --; fi
+
   case "${1:-}" in
     ""|-h|--help|help) usage; [[ "${1:-}" == "" ]] && exit 1 || exit 0 ;;
     profiles) shift; load_config; cmd_profiles "$@" ;;

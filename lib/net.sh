@@ -86,7 +86,7 @@ setup_network() {
 
   podman network create --internal --label "agentdev.net=$id" "$NET_INT" >/dev/null
   podman network create          --label "agentdev.net=$id" "$NET_EXT" >/dev/null
-  if ! podman run -d --name "$PROXY_NAME" --label "agentdev.proxy=$PROFILE" --label "agentdev.net=$id" \
+  if ! podman run -d --pull=missing --name "$PROXY_NAME" --label "agentdev.proxy=$PROFILE" --label "agentdev.net=$id" \
          --network "$NET_INT" --network "$NET_EXT" \
          "${proxy_vols[@]}" "${proxy_env[@]}" "$IMAGE" python3 /usr/local/bin/agentdev-proxy.py >/dev/null; then
     echo "Error: failed to start egress proxy sidecar." >&2

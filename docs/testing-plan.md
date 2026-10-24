@@ -19,7 +19,7 @@ and a small, gated **live tier**.
 | workspace | rw, ro | — |
 | confirm_rw | on, off | (+ --rw-allow pre-approvals) |
 | sandbox.ssh | on, off | — |
-| extra mounts | ro, rw, toml, env, dev, collision, reserved | collisions + reserved targets are errors |
+| extra mounts | ro, rw, config, env, dev, collision, reserved | collisions + reserved targets are errors |
 | template | default, skill-eval, custom | must lint |
 | modifiers | --eval, --keep, --reseed | --keep ⇒ clean; --reseed ⇒ existing profile |
 | command | shell vs `-- cmd` | — |
@@ -112,8 +112,19 @@ behind `make test-live`, never in the default offline suite.
 
 ## Phasing
 
-1. Validity model + offline invariant runner (`matrix.py` + runner), wired into
-   `make test`. Highest value: exhaustive plan coverage, fast, deterministic.
-2. Pairwise generator + negative suite.
-3. Live Tier B behind `make test-live` + the CI job.
+1. **Done** — offline invariant runner (`tests/matrix.py`) wired into `make test`:
+   G1 (mode×auth×trust), G1b (auto resolution), G2 (sandbox exhaustive), G3
+   (--eval), G4 (negatives), plus a cross-cutting safety invariant. 302 checks.
+2. Pairwise generator for any future larger matrix; broaden the negative set.
+3. **Done** — live Tier B (`tests/live.sh`, `make test-live`): launches real
+   containers and asserts enforcement (ro workspace, no-ssh, confirm-rw refusal,
+   skills visibility, single-instance refusal, `--net=none` blocked, allowlist
+   **denies** the non-listed host). Skips cleanly without podman/image.
+   *Known environment skip:* the allowlist *allow-through* case needs the proxy's
+   own upstream egress, which a nested rootless netns often can't provide; it
+   soft-skips there and should pass on a native host. Still needs a CI job.
 4. Golden snapshots (normalized) as a regression backstop.
+
+Note: Tier B surfaced and fixed a real product bug — `confirm_rw_mount` probed
+`/dev/tty` by stat, which passes even with no controlling terminal; it now probes
+by opening the device, so it fails closed correctly in CI/non-interactive runs.

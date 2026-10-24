@@ -53,7 +53,7 @@ both sides of it.
 ## 2. Architecture overview
 
 agentdev is one repo with **no external runtime dependency** beyond `podman` and
-`python3` (for TOML parsing, already a Claude Code prerequisite), and the agentdev image
+`python3` (for JSON config parsing, already a Claude Code prerequisite), and the agentdev image
 it builds and publishes.
 
 ```
@@ -64,7 +64,7 @@ agentdev (this repo)
 │   ├── profile.sh               ← resolve / create / lock / fork / gc a profile (plain folders)
 │   ├── seed.sh                  ← template → profile (lint, copy, scaffold, .claude.json)
 │   ├── memory.sh                ← resolve a memory store; compute the deterministic path
-│   ├── config.sh                ← layered TOML/flag resolution (§5)
+│   ├── config.sh                ← layered JSON/flag resolution (§5)
 │   └── meta.sh                  ← write & read agentdev.meta.json / agentdev.lock
 ├── image/
 │   ├── Containerfile            ← builds ghcr.io/gherlein/agentdev (hardened, non-root)
@@ -114,15 +114,15 @@ Authored fresh. Responsibilities, in order:
 Authored fresh. Provides the same *grammar* localdev popularized, as agentdev's own code:
 
 - `collect_mounts` — single entry point; unions three sources (CLI `-ro`/`-rw`/bare args,
-  the `AGENTDEV_MOUNTS` env var, and `./.agentdev-mounts.toml`) into `VOLUME_MOUNTS` /
-  `DEVICE_MOUNTS` / `MOUNTS_CONTENT`, aborting on any file error.
+  the `AGENTDEV_MOUNTS` env var, and the config's `mounts.read_only`/`mounts.read_write`
+  maps) into `VOLUME_MOUNTS` / `DEVICE_MOUNTS` / `MOUNTS_CONTENT`, aborting on any error.
 - `register_target` — claims one container-side target per source; a second claim on the
   same target is **always fatal** (collision detection). Reserves the workspace and the
   managed agent paths up front.
 - `resolve_path` — normalizes/validates a host source (realpath; must exist & be readable).
 - `collect_host_ca_mount` — bind the host's extra TLS anchors read-only + set
   `NODE_EXTRA_CA_CERTS`.
-- `handle_init_flag` — `agentdev init` writes a starter `.agentdev-mounts.toml`.
+- `handle_init_flag` — `agentdev init` writes a starter `./agentdev-config.json`.
 
 Grammar: `source = destination`, where destination is an absolute container path, a path
 relative to the workspace, or `&` to mirror a relative source's layout. Relative paths and
@@ -133,7 +133,7 @@ relative to the workspace, or `&` to mirror a relative source's layout. Relative
 ```
 agentdev [flags] [mount-args...] [-- command...]
   │
-  ├─ parse flags, resolve config (CLI > ./.agentdev.toml > ~/.agentdev/config.toml > defaults)
+  ├─ parse flags, resolve config (CLI > ./agentdev-config.json [or -c] > ~/.agentdev/config.json > defaults)
   ├─ doctor preflight: ANTHROPIC_API_KEY?, podman?, agentdev image digest present?, template readable?
   ├─ resolve MODE → resolve PROFILE path (clean_root/<run-id> | profiles_root/<name>)
   ├─ if profile absent OR clean:  seed.sh   (lint template, copy, scaffold, .claude.json, .gitignore guard)
@@ -221,10 +221,12 @@ agentdev [MODE] [OPTIONS] [MOUNT-ARGS...] [-- COMMAND...]
 
 | Flag | Effect | Phase |
 |---|---|---|
-| `--template <path>` | Override `[template].source` for this run | 1 |
+| `-c, --config <path>` | Load this JSON config (default: `./agentdev-config.json` if present); grouped keys mirror every flag below | 1 |
+| `--template <path>` | Override `template.source` for this run | 1 |
 | `--auth <mode>` | `auto` \| `api-key-env` \| `interactive` \| `inherit-credentials` (default from config) | 1 |
 | `--login` | Shorthand for `--auth interactive` (Claude Pro/Max subscription login) | 1 |
-| `--keep` | Clean mode: don't delete the profile; print its path | 1 |
+| `--workdir <path>` | **Entry folder**: the container shell's cwd. Relative to the workspace (`/<dir>`), or an absolute container path. Default `workspace.workdir`, else the workspace root | 1 |
+| `--keep` | Clean mode: don't delete the profile; print its path (default `profile.keep`) | 1 |
 | `--reseed` | Re-apply template **config** over an existing profile; leave memory/history | 1 |
 | `--trust <mode>` | `skip-permissions` \| `workspace-only` \| `prompt` (default from config) | 1 |
 | `--dry-run` | Print the settled config, seed plan, and full mount plan; **do not launch** | 1 |
@@ -239,7 +241,7 @@ agentdev [MODE] [OPTIONS] [MOUNT-ARGS...] [-- COMMAND...]
 | `agentdev profiles ls\|show\|new\|rm\|fork\|gc` | Manage `profiles_root`; `gc` sweeps crashed `clean_root` leftovers **and reaps orphaned profile containers** (§2.5) |
 | `agentdev memory ls\|new\|rm` | Manage `memory_root` stores (plain folders) |
 | `agentdev doctor` | Check API key, podman, image digest, template readability + lint |
-| `agentdev init` | Write a starter `.agentdev-mounts.toml` in the launch directory |
+| `agentdev init` | Write a starter `./agentdev-config.json` in the launch directory |
 | `agentdev build` | Build/tag the agentdev image locally from `image/Containerfile` |
 | `agentdev report`, `--net`, cow/patch | **Phase 2** |
 
@@ -252,47 +254,90 @@ agentdev [MODE] [OPTIONS] [MOUNT-ARGS...] [-- COMMAND...]
 
 ## 5. Configuration & resolution
 
-TOML. Resolution order (first found wins per key; **CLI always wins**):
+The sole format is a **JSON config file**: every CLI flag has a matching key, and the keys
+are grouped and ordered consistently (**agent, profile, template, auth, workspace, network,
+mounts, sandbox**). Resolution order (first found wins per key; **CLI always wins**):
 
 1. CLI flags
-2. `./.agentdev.toml` (per-project, committable; relative paths + `&` only)
-3. `~/.agentdev/config.toml` (user; host-specific absolute paths live here)
+2. Project config — `-c/--config <path>`, else `./agentdev-config.json` if present
+   (committable; keep it portable — relative mount sources + `&`)
+3. User config — `~/.agentdev/config.json` (honors `$AGENTDEV_HOME`; host-specific
+   absolute paths live here)
 4. Built-in defaults
 
-External mounts (`[mounts.*]`, `-ro`/`-rw`, `AGENTDEV_MOUNTS`) combine as a **union**. The
-**profile**, **memory store**, and **template** each resolve to exactly one authoritative
-value — one agent home per run. Any error in the authoritative config or template
-**aborts before the container starts** (fail-closed).
+The launcher pre-parses `-c/--config` from anywhere in the argument stream (so it applies to
+subcommands too), stopping at `--` so a passthrough command's own flags are untouched. An
+explicit `-c` pointing at a missing file, or any config that fails to parse, **aborts before
+the container starts** (fail-closed). `lib/jsoncfg.py` is a tiny reader with a
+`get | list | table | check` interface that `lib/config.sh` uses to descend dotted keys.
 
-```toml
-# ~/.agentdev/config.toml
-[agent]
-name  = "claude"                                     # Phase 1: the only value
-image = "ghcr.io/gherlein/agentdev@sha256:…"         # agentdev's own image, pinned by digest
+External mounts (the configs' `mounts.read_only`/`mounts.read_write` maps, `-ro`/`-rw`,
+`AGENTDEV_MOUNTS`) combine as a **union**. The **profile**, **memory store**, and
+**template** each resolve to exactly one authoritative value — one agent home per run.
 
-[profile]
-profiles_root = "~/.agentdev/profiles"
-clean_root    = "~/.cache/agentdev/clean"            # tmpfs-friendly (Phase 2)
-memory_root   = "~/.agentdev/memory"
-default_mode  = "clean"                              # clean | remember | profile
-
-[template]
-source   = "~/.agentdev/templates/default"
-strategy = "copy"                                   # overlay-ro is Phase 2
-include  = ["CLAUDE.md", "settings.json", "hooks/", "skills/", ".mcp.json", "plugins.toml"]
-
-[auth]
-mode = "auto"                                       # auto | api-key-env | interactive | inherit-credentials
-
-[workspace]
-isolation = "mount"                                 # cow | patch-only are Phase 2
-trust     = "skip-permissions"                      # skip-permissions | workspace-only | prompt
-
-[mounts.read-only]
-"~/ref/standards" = "/external/standards"
-[mounts.read-write]
-"~/out/shared"    = "/external/shared"
+```jsonc
+// ./agentdev-config.json  (every key shown; all are optional)
+{
+  "agent": {
+    "name":  "claude",                               // Phase 1: the only value
+    "image": "ghcr.io/gherlein/agentdev@sha256:…"    // agentdev's own image, pinned by digest
+  },
+  "profile": {
+    "default_mode":  "clean",                        // clean | remember | profile
+    "name":          "api-work",                     // profile mode: which named profile (else --profile)
+    "memory_store":  "default",                      // remember mode: which store (else --remember <store>)
+    "keep":          false,                           // clean mode: retain the profile (like --keep)
+    "profiles_root": "~/.agentdev/profiles",
+    "clean_root":    "~/.cache/agentdev/clean",      // tmpfs-friendly (Phase 2)
+    "memory_root":   "~/.agentdev/memory"
+  },
+  "template": {
+    "source":   "~/.agentdev/templates/default",
+    "strategy": "copy",                              // overlay-ro is Phase 2
+    "include":  ["CLAUDE.md", "settings.json", "hooks", "skills", ".mcp.json"]
+  },
+  "auth": {
+    "mode": "auto"                                   // auto | api-key-env | interactive | inherit-credentials
+  },
+  "workspace": {
+    "isolation": "mount",                            // cow | patch-only are Phase 2
+    "trust":     "skip-permissions",                 // skip-permissions | workspace-only | prompt
+    "workdir":   "services/api"                      // ENTRY FOLDER: the shell's cwd; relative to the
+                                                     //   workspace, or absolute; empty/"." = workspace root
+  },
+  "network": {
+    "mode": "off",                                   // off | allowlist | none
+    "log":  false,
+    "mitm": false,
+    "allow": ["api.anthropic.com"]
+  },
+  "mounts": {
+    "workspace":  "rw",                              // rw | ro (the workspace mount mode)
+    "confirm_rw": false,                             // prompt before every read-write mount
+    "rw_allow":   ["~/out/shared"],                  // pre-approve rw mounts under confirm_rw
+    "read_only":  { "~/ref/standards": "/external/standards" },
+    "read_write": { "~/out/shared":    "/external/shared" }
+  },
+  "sandbox": {
+    "ssh": true                                      // mount host SSH keys / agent
+  }
+}
 ```
+
+### 5.1 The entry folder (`workspace.workdir` / `--workdir`)
+
+The workspace always mounts at `/<dir>`. The entry folder is where the container's shell
+(`bash`) starts — its working directory. This makes a **folder per working context** natural:
+keep an `agentdev-config.json` and a `.envrc` in that folder, and launch the agent so it comes
+up already inside it with its environment loaded.
+
+- Resolution: empty or `"."` → the workspace root `/<dir>`; a relative path → under the
+  workspace (`/<dir>/<path>`); an absolute path → used verbatim. `--workdir` wins over config.
+- When the target resolves inside the workspace mount, its **host** path is checked before
+  launch, so a typo fails fast rather than dropping the shell somewhere unexpected.
+- The launcher passes `-w <workdir>` and `-e AGENTDEV_WORKDIR=<workdir>`; the image's
+  `/etc/bash.bashrc` `cd`s there (falling back to `$WORKSPACE`) and runs the `direnv` hook,
+  so a `.envrc` in the folder is picked up (`direnv allow` once per store).
 
 ---
 

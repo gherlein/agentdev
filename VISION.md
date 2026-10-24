@@ -373,64 +373,64 @@ agentdev --dry-run                                   # print the exact mount + s
 
 ## 12. Configuration
 
-TOML, matching localdev's convention. It answers the prompt's questions directly: **what
-to mount read-only / read-write**, **where the config template comes from**, and **where
-runtime (profile/memory) folders are created and mounted**.
+JSON — one grouped `agentdev-config.json` per working context. It answers the prompt's
+questions directly: **what to mount read-only / read-write**, **where the config template
+comes from**, **where runtime (profile/memory) folders are created and mounted**, and **which
+folder the agent's shell starts in**.
 
 ### Resolution order (first found wins per key; CLI always wins)
 
-1. **CLI flags** — `--clean`, `--remember`, `--profile`, `--template`, `--net`,
+1. **CLI flags** — `--clean`, `--remember`, `--profile`, `--template`, `--net`, `--workdir`,
    `--patch-only`/`--cow-workspace`, `-ro`/`-rw` paths.
-2. **Per-project config** — `./.agentdev.toml` in the launch directory.
-3. **User config** — `~/.agentdev/config.toml`.
+2. **Per-project config** — `./agentdev-config.json` in the launch directory (or `-c <path>`).
+3. **User config** — `~/.agentdev/config.json`.
 4. **Built-in defaults.**
 
-External mounts (`[mounts.*]`, `-ro`/`-rw` args, env var) combine as a **union** via
-agentdev's own mount collector, with a `source = destination` / `&`-mirror grammar and
-collision checks. The **profile**, **memory store**, and **template** each resolve to
-exactly one authoritative value — one agent home per run.
+External mounts (the configs' `mounts.read_only`/`mounts.read_write` maps, `-ro`/`-rw` args,
+env var) combine as a **union** via agentdev's own mount collector, with a `"source":
+"destination"` / `&`-mirror grammar and collision checks. The **profile**, **memory store**,
+and **template** each resolve to exactly one authoritative value — one agent home per run.
 
 ### Example
 
-```toml
-# ~/.agentdev/config.toml
-
-[agent]
-name  = "claude"
-image = "ghcr.io/gherlein/agentdev@sha256:…"     # agentdev's own image, pinned by digest
-
-[profile]
-profiles_root = "~/.agentdev/profiles"
-clean_root    = "~/.cache/agentdev/clean"        # put on tmpfs for zero disk residue
-memory_root   = "~/.agentdev/memory"             # memory stores live here
-default_mode  = "clean"                           # clean | remember | profile
-
-[template]
-source   = "~/.agentdev/templates/default"       # dir, or git URL, or composable layers
-layers   = ["base-claude", "python-project"]      # optional, applied in order (stow-style)
-strategy = "copy"                                 # copy | overlay-ro
-include  = ["CLAUDE.md", "settings.json", "hooks/", "skills/", ".mcp.json", "plugins.toml"]
-
-[auth]
-mode = "auto"                                     # auto | api-key-env | inherit-credentials | interactive
-
-[workspace]
-isolation = "mount"                               # mount | cow | patch-only
-trust     = "skip-permissions"                    # skip-permissions | workspace-only | prompt
-
-[network]
-mode      = "isolated"                            # isolated | host | allowlist
-allow     = ["api.anthropic.com", "registry.npmjs.org", "proxy.golang.org"]
-
-[mounts.read-only]
-"~/ref/standards" = "/external/standards"
-"../sibling-repo" = "&"
-
-[mounts.read-write]
-"~/out/shared"    = "/external/shared"
+```json
+{
+  "agent": {
+    "name":  "claude",
+    "image": "ghcr.io/gherlein/agentdev@sha256:…"
+  },
+  "profile": {
+    "default_mode":  "clean",
+    "profiles_root": "~/.agentdev/profiles",
+    "clean_root":    "~/.cache/agentdev/clean",
+    "memory_root":   "~/.agentdev/memory"
+  },
+  "template": {
+    "source":   "~/.agentdev/templates/default",
+    "layers":   ["base-claude", "python-project"],
+    "strategy": "copy",
+    "include":  ["CLAUDE.md", "settings.json", "hooks", "skills", ".mcp.json"]
+  },
+  "auth": {
+    "mode": "auto"
+  },
+  "workspace": {
+    "isolation": "mount",
+    "trust":     "skip-permissions",
+    "workdir":   "."
+  },
+  "network": {
+    "mode":  "isolated",
+    "allow": ["api.anthropic.com", "registry.npmjs.org", "proxy.golang.org"]
+  },
+  "mounts": {
+    "read_only":  { "~/ref/standards": "/external/standards", "../sibling-repo": "&" },
+    "read_write": { "~/out/shared": "/external/shared" }
+  }
+}
 ```
 
-A repo can ship a committed `.agentdev.toml` pinning the template, default mode, and a
+A repo can ship a committed `agentdev-config.json` pinning the template, default mode, and a
 stable mount set so `agentdev` starts the same for everyone there, while host-specific
 absolute paths stay in the user config. Same portability rule as localdev: relative
 paths and `&` are safe to commit; absolute host paths are not. **Any error in the

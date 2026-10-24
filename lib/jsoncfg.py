@@ -1,34 +1,29 @@
 #!/usr/bin/env python3
-"""Tiny TOML reader for the agentdev launcher.
+"""Tiny JSON reader for the agentdev launcher.
+
+The sole config reader: lib/config.sh and lib/mounts.sh descend dotted keys into
+the grouped agentdev-config.json with the verbs below.
 
 Usage:
-  toml.py get   <file> <dotted.key>   -> prints a scalar, exit 1 if missing/not scalar
-  toml.py list  <file> <dotted.key>   -> prints list items, one per line (exit 1 if missing)
-  toml.py table <file> <dotted.key>   -> prints "key\tvalue" lines for a table of scalars
-  toml.py check <file>                -> exit 0 if file parses as TOML, else exit 1 + message
+  jsoncfg.py get   <file> <dotted.key>   -> prints a scalar, exit 1 if missing/not scalar
+  jsoncfg.py list  <file> <dotted.key>   -> prints list items, one per line (exit 1 if missing)
+  jsoncfg.py table <file> <dotted.key>   -> prints "key\tvalue" lines for an object of scalars
+  jsoncfg.py check <file>                -> exit 0 if file parses as JSON, else exit 1 + message
 
 Exit codes: 0 ok; 1 missing/wrong-type; 2 file not found; 3 parse error.
 """
+import json
 import sys
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
-    try:
-        import tomli as tomllib  # type: ignore
-    except ModuleNotFoundError:
-        sys.stderr.write("error: need Python 3.11+ (tomllib) or the 'tomli' package\n")
-        sys.exit(3)
 
 
 def load(path):
     try:
         with open(path, "rb") as fh:
-            return tomllib.load(fh)
+            return json.load(fh)
     except FileNotFoundError:
         sys.exit(2)
-    except tomllib.TOMLDecodeError as exc:
-        sys.stderr.write(f"error: {path}: invalid TOML: {exc}\n")
+    except (json.JSONDecodeError, ValueError) as exc:
+        sys.stderr.write(f"error: {path}: invalid JSON: {exc}\n")
         sys.exit(3)
 
 
@@ -65,7 +60,7 @@ def main(argv):
     value = descend(data, argv[2])
 
     if mode == "get":
-        if isinstance(value, (str, int, float, bool)):
+        if isinstance(value, bool) or isinstance(value, (str, int, float)):
             print(fmt_scalar(value))
             return 0
         return 1
@@ -78,7 +73,7 @@ def main(argv):
     if mode == "table":
         if isinstance(value, dict):
             for key, val in value.items():
-                if isinstance(val, (str, int, float, bool)):
+                if isinstance(val, bool) or isinstance(val, (str, int, float)):
                     print(f"{key}\t{fmt_scalar(val)}")
             return 0
         return 1

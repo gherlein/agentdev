@@ -16,6 +16,7 @@ Plus a cross-cutting safety invariant applied to every positive case.
 
 Run directly, or via `make test`. Exit status is non-zero if any case fails.
 """
+import json
 import os
 import shutil
 import subprocess
@@ -45,17 +46,17 @@ def make_fixtures(root):
         fh.write('{"claudeAiOauth":{"accessToken":"x"}}\n')
     with open(os.path.join(home, ".claude.json"), "w") as fh:
         fh.write('{"oauthAccount":{"accountUuid":"a","emailAddress":"e"},"userID":"u"}\n')
-    with open(os.path.join(agentdev_home, "config.toml"), "w") as fh:
-        fh.write(
-            "[profile]\n"
-            f'profiles_root = "{root}/profiles"\n'
-            f'clean_root    = "{root}/clean"\n'
-            f'memory_root   = "{root}/memory"\n'
-            "[template]\n"
-            f'source = "{REPO}/templates/default"\n'
-            "[network]\n"
-            'allow = ["api.anthropic.com"]\n'      # makes standalone --net=allowlist valid
-        )
+    with open(os.path.join(agentdev_home, "config.json"), "w") as fh:
+        json.dump({
+            "profile": {
+                "profiles_root": f"{root}/profiles",
+                "clean_root": f"{root}/clean",
+                "memory_root": f"{root}/memory",
+            },
+            "template": {"source": f"{REPO}/templates/default"},
+            # makes standalone --net=allowlist valid
+            "network": {"allow": ["api.anthropic.com"]},
+        }, fh)
     return home, agentdev_home, ws
 
 
@@ -211,8 +212,8 @@ def main():
         print("G4  negatives (fail closed)")
         # allowlist with an empty list: use an AGENTDEV_HOME config WITHOUT allow.
         ah2 = os.path.join(root, "home2", ".agentdev"); os.makedirs(ah2, exist_ok=True)
-        with open(os.path.join(ah2, "config.toml"), "w") as fh:
-            fh.write(f'[profile]\nclean_root = "{root}/clean"\n')
+        with open(os.path.join(ah2, "config.json"), "w") as fh:
+            json.dump({"profile": {"clean_root": f"{root}/clean"}}, fh)
         negative("allowlist empty list", ["--clean", "--net=allowlist"],
                  home, ah2, ws, True, "allowlist is empty")
         negative("api-key-env no key", ["--clean", "--auth", "api-key-env"],

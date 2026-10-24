@@ -4,7 +4,7 @@
 # Single entry point collect_mounts() unions three sources into podman args:
 #   1. CLI arguments:   -rw <path>, -ro <path>, bare <path> (ro), /dev/* (device)
 #   2. AGENTDEV_MOUNTS: whitespace-separated host dirs, each mounted read-only
-#   3. .agentdev-mounts.toml in the launch dir: [read-only] / [read-write] tables
+#   3. JSON config:     mounts.read_only / mounts.read_write maps (project + user)
 #
 # Populates:
 #   VOLUME_MOUNTS   array of "-v host:container:mode"
@@ -16,9 +16,7 @@
 # CA_CERT_MOUNT and CA_CERT_ENV and must run after collect_mounts().
 #
 # Every mount claims exactly one container-side target; a second claim is fatal.
-# Requires $LIBDIR (for toml.py) and python3.
-
-MOUNT_FILE_NAME=".agentdev-mounts.toml"
+# Requires $LIBDIR (for jsoncfg.py) and python3.
 
 # Container paths agentdev manages itself; a user mount may target none of these.
 RESERVED_TARGETS=(
@@ -103,9 +101,12 @@ confirm_rw_mount() {
       return 0
     fi
   done
-  if [[ -r /dev/tty && -w /dev/tty ]]; then
-    printf 'Allow READ-WRITE mount  %s -> %s ? [y/N] ' "$resolved_host" "$target" > /dev/tty
-    read -r ans < /dev/tty || ans=""
+  # Probe by actually opening /dev/tty: the device node can exist while open()
+  # fails with ENXIO when there is no controlling terminal (CI, nohup, a harness).
+  if { exec 3<>/dev/tty; } 2>/dev/null; then
+    printf 'Allow READ-WRITE mount  %s -> %s ? [y/N] ' "$resolved_host" "$target" >&3
+    read -r ans <&3 || ans=""
+    exec 3>&-
     case "$ans" in
       [yY]|[yY][eE][sS]) return 0 ;;
       *) echo "rw mount denied: $resolved_host -> $target" >&2; return 1 ;;
@@ -159,23 +160,33 @@ _resolve_dest() {
   esac
 }
 
-_process_file_mounts() {
-  local workspace="$1"
-  [[ -f "$MOUNT_FILE_NAME" ]] || return 0
-  if ! python3 "$LIBDIR/toml.py" check "$MOUNT_FILE_NAME"; then
-    echo "Error: invalid $MOUNT_FILE_NAME" >&2; exit 1
-  fi
-  local table mode src dest rsrc target line
-  for table in read-only read-write; do
-    mode=ro; [[ "$table" == read-write ]] && mode=rw
+# _mounts_from_config FILE WORKSPACE - apply one JSON config's mounts.read_only /
+# mounts.read_write maps. Each entry is "src": "dest", where dest is an absolute
+# container path, a path relative to the workspace, or "&" to mirror src's
+# basename at the container root.
+_mounts_from_config() {
+  local file="$1" workspace="$2"
+  [[ -n "$file" && -f "$file" ]] || return 0
+  local key mode src dest rsrc target
+  for key in read_only read_write; do
+    mode=ro; [[ "$key" == read_write ]] && mode=rw
     while IFS=$'\t' read -r src dest; do
       [[ -z "$src" ]] && continue
       rsrc=$(resolve_path "$(expand_tilde "$src")") || { ((MOUNT_ERRORS++)); continue; }
       target=$(_resolve_dest "$workspace" "$rsrc" "$dest")
       [[ "$mode" == rw ]] && { confirm_rw_mount "$rsrc" "$target" || continue; }
-      _mount "$rsrc" "$target" "$mode" "$MOUNT_FILE_NAME [$table] $src"
-    done < <(python3 "$LIBDIR/toml.py" table "$MOUNT_FILE_NAME" "$table" 2>/dev/null)
+      _mount "$rsrc" "$target" "$mode" "$(basename "$file") [mounts.$key] $src"
+    done < <(python3 "$LIBDIR/jsoncfg.py" table "$file" "mounts.$key" 2>/dev/null)
   done
+}
+
+# _process_json_mounts WORKSPACE - apply the project then user config's mount maps
+# (union, with the usual target-collision guard). load_config has already checked
+# both files parse as JSON, so any here are known-valid.
+_process_json_mounts() {
+  local workspace="$1"
+  _mounts_from_config "${JSON_CONFIG:-}" "$workspace"
+  _mounts_from_config "${USER_CONFIG:-}" "$workspace"
 }
 
 collect_mounts() {
@@ -190,7 +201,7 @@ collect_mounts() {
 
   _process_cli_mounts "$@"
   _process_env_mounts
-  _process_file_mounts "/${dirname}"
+  _process_json_mounts "/${dirname}"
 }
 
 # collect_host_ca_mount - pass the host's extra TLS trust anchors read-only so
@@ -211,28 +222,43 @@ collect_host_ca_mount() {
   fi
 }
 
+# handle_init_flag - `agentdev init` writes a starter agentdev-config.json in the
+# launch directory: the single, committable config for this working context. Keys
+# are grouped and ordered as everywhere else; the mounts maps show the src->dest
+# form (absolute container path, a path relative to the workspace, or "&" to mirror
+# a relative source's basename at the container root). Any error in it aborts a
+# launch (fail-closed). CLI flags override every key.
 handle_init_flag() {
-  local target="$MOUNT_FILE_NAME"
+  local target="agentdev-config.json"
   if [[ -e "$target" ]]; then
     echo "Error: $target already exists; not overwriting." >&2; exit 1
   fi
   cat > "$target" <<'EOF'
-# .agentdev-mounts.toml - extra mounts applied on every agentdev launch here.
-#
-# source = destination, where:
-#   source       host dir: absolute, or relative to this directory
-#   destination  absolute container path, a path relative to the workspace,
-#                or "&" to mirror a relative source's basename at the container root
-#
-# Relative paths and "&" are portable and safe to commit; absolute host paths
-# should stay gitignored. Any error in this file aborts the launch.
-
-[read-only]
-# "~/ref/standards" = "/external/standards"
-# "../sibling-repo" = "&"
-
-[read-write]
-# "~/out/shared"    = "/external/shared"
+{
+  "agent": {
+    "image": "ghcr.io/gherlein/agentdev:latest"
+  },
+  "profile": {
+    "default_mode": "clean"
+  },
+  "workspace": {
+    "trust": "skip-permissions",
+    "workdir": "."
+  },
+  "network": {
+    "mode": "off"
+  },
+  "mounts": {
+    "workspace": "rw",
+    "read_only": {
+    },
+    "read_write": {
+    }
+  },
+  "sandbox": {
+    "ssh": true
+  }
+}
 EOF
   echo "Wrote $target" >&2
 }

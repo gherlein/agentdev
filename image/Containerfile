@@ -95,7 +95,8 @@ RUN { \
     echo 'export PATH="$NVM_DIR/default/bin:$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"'; \
     echo 'alias emacs=mg'; \
     echo 'alias clauded="claude --dangerously-skip-permissions"'; \
-    echo '[[ -n "$WORKSPACE" && -d "$WORKSPACE" ]] && cd "$WORKSPACE"'; \
+    echo 'eval "$(direnv hook bash)" 2>/dev/null || true'; \
+    echo 'if [[ -n "$AGENTDEV_WORKDIR" && -d "$AGENTDEV_WORKDIR" ]]; then cd "$AGENTDEV_WORKDIR"; elif [[ -n "$WORKSPACE" && -d "$WORKSPACE" ]]; then cd "$WORKSPACE"; fi'; \
     echo 'export AGENTDEV=1; export container=podman; export debian_chroot=agentdev'; \
     echo '__agentdev_tag="\[\e[1;36m\][agentdev]\[\e[0m\] "'; \
     echo 'case "$PS1" in *"[agentdev]"*) ;; *) PS1="${__agentdev_tag}${PS1}";; esac'; \

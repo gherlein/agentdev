@@ -7,7 +7,7 @@ PREFIX     ?= $(HOME)/.local
 BINDIR     := $(PREFIX)/bin
 
 SHELLS  := agentdev $(wildcard lib/*.sh) image/entrypoint.sh tests/smoke.sh
-PYFILES := lib/toml.py image/proxy.py tests/matrix.py tests/test_proxy.py
+PYFILES := lib/jsoncfg.py image/proxy.py tests/matrix.py tests/test_proxy.py
 
 .DEFAULT_GOAL := help
 
@@ -37,6 +37,10 @@ test: ## Run the offline suite: smoke + option-permutation matrix (docs/testing-
 matrix: ## Run just the profile-option permutation matrix (offline, dry-run based)
 	python3 ./tests/matrix.py
 
+.PHONY: test-live
+test-live: ## Tier B: launch real containers to verify enforcement (needs podman + image)
+	./tests/live.sh
+
 .PHONY: lint
 lint: ## Syntax-check shell + python (uses shellcheck if installed)
 	@for f in $(SHELLS); do bash -n "$$f" && echo "ok  $$f"; done
@@ -60,7 +64,6 @@ uninstall: ## Remove the symlink from PREFIX/bin
 .PHONY: clean
 clean: ## Remove local build/test cruft (pycache); image is left intact
 	rm -rf lib/__pycache__
-	rm -f .agentdev-mounts.toml
 
 .PHONY: image-clean
 image-clean: ## Remove the built container image

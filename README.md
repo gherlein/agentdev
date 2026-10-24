@@ -33,7 +33,7 @@ export ANTHROPIC_API_KEY=sk-...  # needed for clean/remember modes
 The same actions are available without make: `agentdev build`, `agentdev doctor`,
 `tests/smoke.sh`, and symlinking `agentdev` onto your `PATH`.
 
-Requirements: `podman`, `python3` (3.11+ for `tomllib`), and Linux for
+Requirements: `podman`, `python3`, and Linux for
 `--userns=keep-id` ownership mapping.
 
 The image bundles the full localdev toolset — Node LTS (nvm) + TypeScript/pnpm/eslint/
@@ -176,33 +176,50 @@ report) are in [`docs/user-guide.md` §13](./docs/user-guide.md#13-skill-evaluat
 agentdev profiles ls|show|new|rm|fork|gc   # manage named profiles (plain folders)
 agentdev memory   ls|new|rm                # manage memory stores (plain folders)
 agentdev doctor               # check API key, podman, image, template
-agentdev init                 # write a starter .agentdev-mounts.toml
+agentdev init                 # write a starter ./agentdev-config.json
 agentdev build                # (re)build the image from image/Containerfile
 ```
 
 ## Configuration
 
-TOML, resolved CLI → `./.agentdev.toml` → `~/.agentdev/config.toml` → built-in defaults
-(first found wins per key; CLI always wins). See [`DESIGN.md` §5](./DESIGN.md) for the full
-schema. Minimal example:
+Every CLI flag has a matching key in a **JSON config file**. By default agentdev reads
+`./agentdev-config.json` if present; point elsewhere with `-c/--config <path>`. Resolution
+is first-found-wins per key:
 
-```toml
-# ~/.agentdev/config.toml
-[agent]
-image = "ghcr.io/gherlein/agentdev@sha256:…"   # pin by digest for reproducibility
-[profile]
-default_mode = "clean"
-[template]
-source = "~/.agentdev/templates/default"
-[workspace]
-trust = "skip-permissions"                      # skip-permissions | workspace-only | prompt
 ```
+CLI flags  →  ./agentdev-config.json (or -c <path>)  →  ~/.agentdev/config.json  →  built-in defaults
+```
+
+The JSON keys are grouped and ordered the same everywhere: **agent, profile, template,
+auth, workspace, network, mounts, sandbox**. A complete, annotated example lives in
+[`examples/profile-folder/`](./examples/profile-folder). The idea: keep one folder per
+working context holding its `agentdev-config.json` and a `.envrc`, and launch the agent so
+its shell starts right there (`workspace.workdir`, or `--workdir`). Minimal example:
+
+```json
+{
+  "agent":     { "image": "ghcr.io/gherlein/agentdev@sha256:…" },
+  "profile":   { "default_mode": "profile", "name": "api-work" },
+  "template":  { "source": "~/.agentdev/templates/default" },
+  "workspace": { "trust": "skip-permissions", "workdir": "services/api" }
+}
+```
+
+`workspace.workdir` (new) is the **entry folder**: where the container shell starts (the
+bash cwd). Empty or `"."` is the workspace root; a relative path resolves under it; an
+absolute path is used as given. A `.envrc` in that folder is loaded automatically (direnv
+is in the image; run `direnv allow` once). CLI `--workdir <path>` overrides it per run.
+
+Keys are the same two-tier split as before: commit a portable `./agentdev-config.json`
+per project, and keep host-specific defaults (an image digest, custom roots) in
+`~/.agentdev/config.json`. `agentdev init` scaffolds a starter file. See
+[`DESIGN.md` §5](./DESIGN.md) for the full schema.
 
 ## Layout
 
 ```
 agentdev              launcher (bash)
-lib/                  config, mounts, seed, profile, memory, meta (+ toml.py)
+lib/                  config, mounts, seed, profile, memory, meta (+ jsoncfg.py)
 image/                Containerfile + entrypoint.sh  → ghcr.io/gherlein/agentdev
 templates/default/    seed template (CLAUDE.md, settings.json, hooks/, claude.json.seed)
 ```

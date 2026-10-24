@@ -1,0 +1,28 @@
+{
+  "agent": {
+    "name": "claude",
+    "image": "ghcr.io/gherlein/agentdev:latest"
+  },
+  "profile": {
+    "default_mode": "profile",
+    "name": "example",
+    "keep": false
+  },
+  "auth": {
+    "mode": "auto"
+  },
+  "workspace": {
+    "trust": "skip-permissions",
+    "workdir": "."
+  },
+  "network": {
+    "mode": "off"
+  },
+  "mounts": {
+    "workspace": "rw",
+    "confirm_rw": false
+  },
+  "sandbox": {
+    "ssh": true
+  }
+}
