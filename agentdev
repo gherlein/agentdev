@@ -455,13 +455,22 @@ extract_config_flag() {
   done
 }
 
+# config_present - true when a config file is resolvable, so a bare `agentdev`
+# (no flags) can launch straight from it per the documented folder-per-context
+# workflow. An explicit -c is honored even if missing so load_config reports it.
+config_present() {
+  [[ "$JSON_CONFIG_EXPLICIT" == yes ]] && return 0
+  [[ -f "$JSON_CONFIG" || -f "$USER_CONFIG" ]]
+}
+
 main() {
   JSON_CONFIG="./agentdev-config.json"; JSON_CONFIG_EXPLICIT=no
   extract_config_flag "$@"
   if [[ ${#CLEAN_ARGS[@]} -gt 0 ]]; then set -- "${CLEAN_ARGS[@]}"; else set --; fi
 
   case "${1:-}" in
-    ""|-h|--help|help) usage; [[ "${1:-}" == "" ]] && exit 1 || exit 0 ;;
+    -h|--help|help) usage; exit 0 ;;
+    "") if config_present; then launch; else usage >&2; exit 1; fi ;;
     profiles) shift; load_config; cmd_profiles "$@" ;;
     memory)   shift; load_config; cmd_memory "$@" ;;
     doctor)   cmd_doctor ;;

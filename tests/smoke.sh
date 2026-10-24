@@ -150,6 +150,37 @@ EOF
 check "project config overrides user" "dryq 'trust:.*prompt' --clean"
 rm -f agentdev-config.json
 
+echo "bare invocation (no flags):"
+# A bare `agentdev` must launch straight from a resolvable config (the documented
+# folder-per-context workflow) and only fall back to usage when there is no config
+# at all. Exercised offline with a podman stub that records the launch and a fresh
+# AGENTDEV_HOME so the host's real ~/.agentdev never leaks in.
+BARE="$T/bare"; mkdir -p "$BARE/withconfig" "$BARE/noconfig" "$BARE/home" "$BARE/bin"
+cat > "$BARE/bin/podman" <<'STUB'
+#!/bin/bash
+echo "PODMAN-STUB-RAN"
+STUB
+chmod +x "$BARE/bin/podman"
+cat > "$BARE/withconfig/agentdev-config.json" <<EOF
+{
+  "profile": { "default_mode": "clean", "profiles_root": "$T/profiles",
+               "clean_root": "$BARE/clean", "memory_root": "$T/memory" },
+  "template": { "source": "$REPO/templates/default" },
+  "sandbox": { "ssh": false }
+}
+EOF
+BARE_ENV="AGENTDEV_HOME='$BARE/home' PATH='$BARE/bin:$PATH'"
+# With a project config present, bare launch reaches the (stubbed) container run...
+check "bare + config launches"       "cd '$BARE/withconfig' && eval $BARE_ENV '$AD' 2>/dev/null | grep -q PODMAN-STUB-RAN"
+check "bare + config shows no usage" "cd '$BARE/withconfig' && ! eval $BARE_ENV '$AD' 2>&1 | grep -q 'Usage:'"
+# ...but with no config anywhere it must still refuse and print usage, exit non-zero.
+check "bare + no config = usage"     "cd '$BARE/noconfig' && eval $BARE_ENV '$AD' 2>&1 | grep -q 'Usage:'"
+check "bare + no config exits 1"     "cd '$BARE/noconfig' && ! ( eval $BARE_ENV '$AD' >/dev/null 2>&1 )"
+check "bare + no config no launch"   "cd '$BARE/noconfig' && ! eval $BARE_ENV '$AD' 2>/dev/null | grep -q PODMAN-STUB-RAN"
+# -h/--help always prints usage and exits 0 regardless of config.
+check "--help exits 0 with config"   "cd '$BARE/withconfig' && eval $BARE_ENV '$AD' --help | grep -q 'Usage:'"
+cd "$T/ws"
+
 echo
 echo "RESULT: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]
