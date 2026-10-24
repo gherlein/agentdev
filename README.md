@@ -215,6 +215,12 @@ per project, and keep host-specific defaults (an image digest, custom roots) in
 `~/.agentdev/config.json`. `agentdev init` scaffolds a starter file. See
 [`DESIGN.md` §5](./DESIGN.md) for the full schema.
 
+Ready-to-copy sample configs:
+
+- [`examples/profile-folder/`](./examples/profile-folder) — a folder-per-context setup with a `.envrc`.
+- [`examples/isolated/`](./examples/isolated) — a locked-down profile (allowlist net, read-only workspace, no SSH, api-key auth) for untrusted code or skill evaluation.
+- [`examples/basic-skills/`](./examples/basic-skills) — an everyday persistent profile that seeds a few basic skills (`run-tests`, `git-commit`, `review-diff`) from a bundled template.
+
 ## Layout
 
 ```

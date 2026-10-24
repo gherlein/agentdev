@@ -1,0 +1,36 @@
+{
+  "agent": {
+    "name": "claude",
+    "image": "ghcr.io/gherlein/agentdev:latest"
+  },
+  "profile": {
+    "default_mode": "clean",
+    "keep": false
+  },
+  "auth": {
+    "mode": "api-key-env"
+  },
+  "template": {
+    "include": ["CLAUDE.md", "settings.json"]
+  },
+  "workspace": {
+    "trust": "workspace-only",
+    "workdir": "."
+  },
+  "network": {
+    "mode": "allowlist",
+    "allow": ["api.anthropic.com"],
+    "log": true,
+    "mitm": false
+  },
+  "mounts": {
+    "workspace": "ro",
+    "confirm_rw": true,
+    "rw_allow": [],
+    "read_only": {},
+    "read_write": {}
+  },
+  "sandbox": {
+    "ssh": false
+  }
+}

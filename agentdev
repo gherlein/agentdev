@@ -22,35 +22,41 @@ usage() {
   cat <<'EOF'
 Usage: agentdev [MODE] [OPTIONS] [MOUNT-ARGS...] [-- COMMAND...]
 
-Config:
-  -c, --config <path>   JSON config file (default: ./agentdev-config.json if present).
-                        Every option below has a matching, grouped key; CLI wins.
+agentdev is configured by a JSON file — ./agentdev-config.json by default (or -c <path>),
+with ~/.agentdev/config.json for host-wide defaults. Keep one config (and a .envrc) per
+working context and just run `agentdev`; `agentdev init` scaffolds a starter file. You
+don't need any flag below once the file is set up — each just OVERRIDES its config key for
+a single run. "(cfg: KEY)" names the key a flag overrides; flags marked "(per-run)" are
+one-shot actions with no config key.
 
-Modes (default from config; built-in default: --clean):
+  -c, --config <path>   use this JSON config instead of ./agentdev-config.json
+
+Modes  (cfg: profile.default_mode; built-in default: clean)
   --clean               fresh throwaway profile, discarded on exit
-  --remember [store]    clean home + a persistent memory store (default: "default")
-  --profile <name>      a persistent named profile under profiles_root
+  --remember [store]    clean home + a persistent memory store   (cfg: profile.memory_store)
+  --profile <name>      a persistent named profile               (cfg: profile.name)
 
-Options:
-  --template <path>     override the seed template for this run
-  --auth <mode>         api-key-env | interactive  (override config)
-  --login               shorthand for --auth interactive (Claude Pro/Max subscription)
-  --trust <mode>        skip-permissions | workspace-only | prompt
-  --workdir <path>      entry folder: where the container shell starts (bash cwd).
-                        Relative to the workspace, or an absolute container path.
-  --keep                clean mode: keep the profile and print its path
-  --reseed              re-apply template config over an existing profile
-  --dry-run             print the settled plan and the podman command; do not launch
+Options  (flag → the config key it overrides)
+  --template <path>     seed template for this run               (cfg: template.source)
+  --auth <mode>         auto|api-key-env|interactive|inherit-credentials  (cfg: auth.mode)
+  --login               shorthand for --auth interactive (subscription login)
+  --trust <mode>        skip-permissions|workspace-only|prompt   (cfg: workspace.trust)
+  --workdir <path>      entry folder: where the shell starts (bash cwd); relative to the
+                        workspace, or absolute                   (cfg: workspace.workdir)
+  --keep                clean mode: keep the profile, print its path  (cfg: profile.keep)
+  --reseed              re-apply template config over an existing profile       (per-run)
+  --dry-run             print the settled plan and the podman command; no launch (per-run)
   -ro <path> / -rw <path> / <dir> / /dev/*   extra mounts
+                                        (cfg: mounts.read_only / mounts.read_write)
 
-Sandbox (skill-evaluation) options:
-  --eval                locked-down preset: allowlist net + confirm-rw + ro workspace
-                        + api-key auth + no SSH (see docs/user-guide.md)
-  --net <mode>          off | allowlist | none   (egress isolation; VISION §10)
-  --confirm-rw          prompt before every read-write mount (fail-closed, no TTY)
-  --rw-allow <path>     pre-approve a read-write mount for --confirm-rw (repeatable)
-  --workspace-ro        mount the workspace read-only
-  --no-ssh              do not mount host SSH keys / agent
+Sandbox (skill-evaluation) options
+  --eval                locked-down preset = allowlist net + confirm-rw + ro workspace
+                        + api-key auth + no SSH (see docs/user-guide.md)         (per-run)
+  --net <mode>          off|allowlist|none  egress isolation      (cfg: network.mode)
+  --confirm-rw          prompt before every read-write mount      (cfg: mounts.confirm_rw)
+  --rw-allow <path>     pre-approve a read-write mount, repeatable (cfg: mounts.rw_allow)
+  --workspace-ro        mount the workspace read-only             (cfg: mounts.workspace=ro)
+  --no-ssh              do not mount host SSH keys / agent         (cfg: sandbox.ssh=false)
 
 Subcommands:
   profiles  ls|show|new|rm|fork|gc

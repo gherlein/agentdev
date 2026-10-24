@@ -1,0 +1,30 @@
+{
+  "agent": {
+    "name": "claude",
+    "image": "ghcr.io/gherlein/agentdev:latest"
+  },
+  "profile": {
+    "default_mode": "profile",
+    "name": "basic-skills"
+  },
+  "auth": {
+    "mode": "auto"
+  },
+  "template": {
+    "source": "./template",
+    "include": ["CLAUDE.md", "settings.json", "skills"]
+  },
+  "workspace": {
+    "trust": "skip-permissions",
+    "workdir": "."
+  },
+  "network": {
+    "mode": "off"
+  },
+  "mounts": {
+    "workspace": "rw"
+  },
+  "sandbox": {
+    "ssh": true
+  }
+}
