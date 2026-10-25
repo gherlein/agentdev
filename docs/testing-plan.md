@@ -90,6 +90,25 @@ A curated ~12-case matrix that actually launches containers and asserts policy i
 Gate on `command -v podman` + the image present; skip (not fail) otherwise. Runs
 behind `make test-live`, never in the default offline suite.
 
+## Tier C — live agent persistence (gated, real model cost)
+
+`tests/live-agent.sh` (`make test-live-agent`) is the one suite that drives a **real
+agent** making real model calls, to prove profile persistence end to end:
+
+1. create a throwaway named profile;
+2. one-shot run 1 (`agentdev --profile … --prompt <file>`) writes a secret into the
+   profile's `.claude` home (memory) and leaves a session transcript (history);
+3. hard-assert on the host that both the memory file and a non-empty transcript
+   persisted;
+4. one-shot run 2 (fresh session, same profile) whose prompt can only succeed by
+   reading the persisted secret — recall is retried once, then fails.
+
+Auth is subscription (profile `auth=auto` inherits the host login; `ANTHROPIC_API_KEY`
+is deliberately unset). Gate on podman + image + a readable host login
+(`~/.claude/.credentials.json`); skip cleanly otherwise. Because prompts go through
+`--prompt`, there is no inline `-p` and no TTY-stdin hang; the EXIT trap force-removes
+containers by label so a stall can never wedge podman.
+
 ## Harness
 
 - **Matrix spec** — `tests/matrix.py` defines each option's values + the validity
@@ -101,8 +120,9 @@ behind `make test-live`, never in the default offline suite.
 - **Live runner** — `tests/matrix_live.sh`, gated, runs the Tier B probes.
 - **Golden backstop** — a normalizer strips run-ids/tmp paths/digests so a few
   representative cases can also be snapshot-compared as a regression catch.
-- Integration: `make test` runs the offline suite (extends today's `smoke.sh`);
-  `make test-live` runs Tier B.
+- Integration: `make test` (alias `make run-tests`) runs the offline suite
+  (`smoke.sh` + `matrix.py`, including the `--prompt` cases); `make test-live` runs
+  Tier B; `make test-live-agent` runs Tier C.
 
 ## CI
 

@@ -227,11 +227,12 @@ agentdev [MODE] [OPTIONS] [MOUNT-ARGS...] [-- COMMAND...]
 | `--login` | Shorthand for `--auth interactive` (Claude Pro/Max subscription login) | 1 |
 | `--workdir <path>` | **Entry folder**: the container shell's cwd. Relative to the workspace (`/<dir>`), or an absolute container path. Default `workspace.workdir`, else the workspace root | 1 |
 | `--keep` | Clean mode: don't delete the profile; print its path (default `profile.keep`) | 1 |
+| `--prompt <file>` | Run the agent once, headless, on the prompt read from `<file>` (path optional). The **only** supported way to pass a prompt — no inline `-p`. Mounts the file read-only and runs `claude --dangerously-skip-permissions -p "$(cat …)"` with stdin closed; cannot combine with `-- <command>` | 1 |
 | `--reseed` | Re-apply template **config** over an existing profile; leave memory/history | 1 |
 | `--trust <mode>` | `skip-permissions` \| `workspace-only` \| `prompt` (default from config) | 1 |
 | `--dry-run` | Print the settled config, seed plan, and full mount plan; **do not launch** | 1 |
 | `-ro <path>` / `-rw <path>` / `<path>` | External mounts (handled by `lib/mounts.sh`) | 1 |
-| `-- <command...>` | Run this instead of interactive `bash` (e.g. `-- claude -p "…"`) | 1 |
+| `-- <command...>` | Run an arbitrary command instead of interactive `bash` (e.g. `-- bash -lc 'make test'`). Not for prompts — use `--prompt` | 1 |
 | `--net=allowlist`, `--cow-workspace`, `--patch-only`, `--budget`, `--fan-out N` | — | **2/3** |
 
 ### Subcommands (management surface)
@@ -246,9 +247,12 @@ agentdev [MODE] [OPTIONS] [MOUNT-ARGS...] [-- COMMAND...]
 | `agentdev report`, `--net`, cow/patch | **Phase 2** |
 
 **Default command.** The container's default command is interactive `bash`; the user runs
-`claude` inside. `-- <command>` runs a command instead, which is how automation and
-`--fan-out` (later) drive it:
-`agentdev --clean -- claude --dangerously-skip-permissions -p "fix #123"`.
+`claude` inside. To start the agent on a prompt, `--prompt <file>` is the one supported
+path — it builds the headless command itself
+(`claude --dangerously-skip-permissions -p "$(cat <mounted-file>)" </dev/null`), so the
+prompt is never a shell-quoted argument and stdin never blocks. `-- <command>` runs an
+arbitrary non-prompt command instead (and is how `--fan-out` will later drive workers):
+`agentdev --clean --prompt task.md`.
 
 ---
 

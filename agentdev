@@ -44,6 +44,9 @@ Options  (flag → the config key it overrides)
   --workdir <path>      entry folder: where the shell starts (bash cwd); relative to the
                         workspace, or absolute                   (cfg: workspace.workdir)
   --keep                clean mode: keep the profile, print its path  (cfg: profile.keep)
+  --prompt <file>       run the agent once, headless, on the prompt read from <file>
+                        (path optional); the only way to pass a prompt. Implies
+                        skip-permissions; cannot combine with `-- command`       (per-run)
   --reseed              re-apply template config over an existing profile       (per-run)
   --dry-run             print the settled plan and the podman command; no launch (per-run)
   -ro <path> / -rw <path> / <dir> / /dev/*   extra mounts
@@ -105,6 +108,7 @@ launch() {
   local TEMPLATE_OVERRIDE="" TRUST_OVERRIDE="" AUTH_OVERRIDE=""
   local RESEED=no DRY_RUN=no
   local MOUNT_ARGS=() COMMAND=()
+  local PROMPT_FILE="" PROMPT_MOUNT=()
   local NET_OVERRIDE="" WS_MODE_OVERRIDE="" SSH_OVERRIDE="" CONFIRM_RW_OVERRIDE="" EVAL_PRESET=no
   RW_ALLOW=()
   MODE=""; KEEP=no
@@ -124,6 +128,8 @@ launch() {
       --login)    AUTH_OVERRIDE="interactive" ;;
       --workdir)  WORKDIR_OVERRIDE="${2:?--workdir needs a path}"; shift ;;
       --workdir=*) WORKDIR_OVERRIDE="${1#--workdir=}" ;;
+      --prompt)   PROMPT_FILE="${2:?--prompt needs a file path}"; shift ;;
+      --prompt=*) PROMPT_FILE="${1#--prompt=}" ;;
       --keep)     KEEP_CLI=yes ;;
       --reseed)   RESEED=yes ;;
       --dry-run)  DRY_RUN=yes ;;
@@ -157,6 +163,24 @@ launch() {
 
   load_config
   MODE="${MODE:-$DEFAULT_MODE}"
+
+  # --prompt <file>: the one supported way to start the agent on a prompt. The file
+  # is mounted read-only and the agent reads it via command substitution, so the
+  # prompt text never passes through a shell-quoted argument (no quoting pitfalls)
+  # and stdin is closed (no interactive-TTY hang). It replaces, and cannot be
+  # combined with, a trailing `-- command`.
+  if [[ -n "$PROMPT_FILE" ]]; then
+    if [[ ${#COMMAND[@]} -gt 0 ]]; then
+      echo "Error: --prompt cannot be combined with a '-- command'." >&2; exit 1
+    fi
+    local prompt_abs; prompt_abs="$(expand_tilde "$PROMPT_FILE")"
+    [[ -f "$prompt_abs" && -r "$prompt_abs" ]] || {
+      echo "Error: --prompt file not found or unreadable: $PROMPT_FILE" >&2; exit 1; }
+    prompt_abs="$(cd "$(dirname "$prompt_abs")" && pwd)/$(basename "$prompt_abs")"
+    PROMPT_MOUNT=(-v "$prompt_abs:/home/developer/.agentdev-prompt:ro")
+    COMMAND=(bash -lc 'claude --dangerously-skip-permissions -p "$(cat /home/developer/.agentdev-prompt)" </dev/null')
+  fi
+
   [[ -n "$TEMPLATE_OVERRIDE" ]] && TEMPLATE_SOURCE="$(expand_tilde "$TEMPLATE_OVERRIDE")"
   [[ -n "$TRUST_OVERRIDE" ]] && WS_TRUST="$TRUST_OVERRIDE"
   [[ -n "$AUTH_OVERRIDE" ]] && AUTH_MODE="$AUTH_OVERRIDE"
@@ -390,6 +414,7 @@ launch() {
     "${SSH_MOUNT[@]}" "${SSH_AGENT[@]}"
     "${CA_CERT_MOUNT[@]}"
     "${VOLUME_MOUNTS[@]}"
+    "${PROMPT_MOUNT[@]}"
     "${API_ENV[@]}" "${CA_CERT_ENV[@]}"
     -v "$MOUNTS_TMPFILE:/home/developer/mounts:ro"
     -e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)"
@@ -408,6 +433,7 @@ launch() {
     echo "template:      $TEMPLATE_SOURCE"
     echo "workspace:     $PWD -> /$DIR_NAME ($WS_MOUNT_MODE)   (enc: $ENC)"
     echo "entry folder:  $CONTAINER_WORKDIR"
+    [[ -n "$PROMPT_FILE" ]] && echo "prompt file:   $PROMPT_FILE -> /home/developer/.agentdev-prompt (ro); headless, skip-permissions"
     echo "trust:         $WS_TRUST    auth: $AUTH_MODE -> $AUTH_EFFECTIVE"
     if [[ "$NET_MODE" == allowlist ]]; then
       echo "network:       allowlist (${#NET_ALLOW[@]} rule(s), log=$NET_LOG, mitm=$NET_MITM) via proxy sidecar"

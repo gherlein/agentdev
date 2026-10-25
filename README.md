@@ -66,8 +66,12 @@ agentdev --clean --template ~/configs/minimal-claude -ro ~/ref/api-docs -rw ~/ou
 # See exactly what would run, change nothing.
 agentdev --clean --dry-run
 
-# Run a command instead of an interactive shell.
-agentdev --clean -- claude --dangerously-skip-permissions -p "fix the failing test"
+# Run the agent once, headless, on a prompt read from a file (see below).
+echo "fix the failing test" > task.md
+agentdev --clean --prompt task.md
+
+# Run an arbitrary command instead of an interactive shell.
+agentdev --clean -- bash -lc 'make test'
 ```
 
 The current working directory is the read-write workspace at `/<dirname>` inside the
@@ -106,38 +110,42 @@ for the three kinds of MCP server and how each is controlled.
 
 ### Run a one-shot command (autonomous agent)
 
-Everything after `--` is run **verbatim** as the container's command instead of an
-interactive shell. The container runs that one command and exits (`--rm`), and
-`agentdev` exits with the command's status — so this is how you drive a single,
-unattended agentic task:
+To drive a single unattended agentic task, put the prompt in a **file** and pass it
+with `--prompt <file>`. That is the one supported way to start the agent on a prompt —
+there is deliberately no inline `-p "…"`:
 
 ```bash
-agentdev --profile myproj -- \
-  claude --dangerously-skip-permissions -p "read the spec and implement the code"
+cat > task.md <<'EOF'
+Read the spec in DESIGN.md and implement the code.
+EOF
+agentdev --profile myproj --prompt task.md
 ```
 
-Four things to get right for an unattended run:
+agentdev mounts the file read-only and the agent reads it via `"$(cat …)"`, so the
+prompt never passes through a shell-quoted argument (no quoting pitfalls) and stdin is
+closed (no interactive-TTY hang). `--prompt` runs **headless with permissions
+skipped**, the container exits (`--rm`) when the task finishes, and `agentdev` exits
+with the agent's status. Why a file and not a flag string: it sidesteps every quoting,
+escaping, and stdin-blocking footgun that inline prompts hit.
 
-- **Working directory is your repo.** The command runs at `/<dirname>` — the current
-  directory bind-mounted in — so the agent reads the spec and edits the code in place.
-  Run `agentdev` from the project you want worked on.
+Three things still matter for an unattended run:
+
+- **Working directory is your repo.** The agent runs at `/<dirname>` — the current
+  directory bind-mounted in — so it reads the spec and edits the code in place. Run
+  `agentdev` from the project you want worked on. (The prompt file can live anywhere;
+  pass a path.)
 - **Auth depends on mode.** In **profile** mode, `auth = auto` inherits your host
   subscription login — both the token and the claude.ai account block — into the
-  profile, so `claude -p` works with connectors and managed settings. (If your host
+  profile, so the agent works with connectors and managed settings. (If your host
   login lacks a needed scope, sign in once inside the profile with `claude auth
   login`; it persists.) In **clean** and **remember** modes credential inheritance
   is disabled, so export `ANTHROPIC_API_KEY` and add `--auth api-key-env`.
-- **Grant permissions explicitly.** A headless run that edits files will otherwise
-  stall on tool-approval prompts. Pass `--dangerously-skip-permissions` (or
-  `--permission-mode acceptEdits`) **on the `claude` command itself** — the image's
-  `clauded` alias does *not* expand here, because the command is exec'd directly, not
-  through an interactive shell. `agentdev --trust` only pre-accepts the *trust
-  dialog*, not per-tool permissions, so it is not enough on its own.
-- **Preview first.** Prefix with `--dry-run` to see the exact `podman` command,
-  resolved auth/trust, and that your prompt survived quoting — before a real,
-  file-mutating run.
+- **Preview first.** Prefix with `--dry-run` to see the exact `podman` command, the
+  resolved auth, and the mounted prompt file — before a real, file-mutating run.
 
-For fanning this out across many tasks in parallel, see
+For an arbitrary (non-prompt) command, the `-- <command>` passthrough still runs
+verbatim in the container (e.g. `agentdev --clean -- bash -lc 'make test'`); it is not
+for feeding prompts. For fanning prompts out across many tasks in parallel, see
 [`examples/one-shot-orchestrator/`](./examples/one-shot-orchestrator/).
 
 ### Skills from a shared store
@@ -149,7 +157,8 @@ own:
 
 ```bash
 sm sync --copy --agent-home ~/.agentdev/profiles/research   # real dirs, container-safe
-agentdev --profile research -- claude --dangerously-skip-permissions -p "…"
+echo "use the available skills to do X" > task.md
+agentdev --profile research --prompt task.md
 ```
 
 See [`docs/applying-sm-managed-skills.md`](./docs/applying-sm-managed-skills.md)
@@ -161,8 +170,8 @@ To evaluate skills in a locked-down agent — no network except an allowlist, ev
 read-write mount confirmed, a read-only workspace, no host SSH — use `--eval`:
 
 ```bash
-agentdev --eval --profile skill-eval -- \
-  claude --dangerously-skip-permissions -p "use the available skills to do X"
+echo "use the available skills to do X" > task.md
+agentdev --eval --profile skill-eval --prompt task.md
 agentdev report skill-eval          # audit what the run reached on the network
 ```
 

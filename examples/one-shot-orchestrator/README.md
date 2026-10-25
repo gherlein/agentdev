@@ -4,6 +4,14 @@ A minimal example of an external "master" process that spawns child processes,
 each launching an **agentdev** container to do one task, and collects each
 agent's result as a file.
 
+> **When to reach for this vs. `agentdev --prompt`.** For a single prompted run,
+> `agentdev --profile X --prompt task.md` is the one-liner — agentdev feeds the
+> file to the agent headless (see the root README). This example exists for the
+> step beyond that: fanning out *many* tasks in parallel, each with its own
+> container, and publishing each result **atomically** via a small in-container
+> `worker.sh`. The worker reads its task from a file too; it uses claude's own
+> `-p` internally because it runs the agent directly inside the container.
+
 ## The model
 
 ```

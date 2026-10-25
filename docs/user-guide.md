@@ -69,16 +69,25 @@ agentdev --clean           # interactive shell in a fresh throwaway agent
 agentdev --profile work    # a persistent named profile
 ```
 
-A mode (or any launch argument) is required — **bare `agentdev` prints usage and
-exits**; it does not launch. Inside, you get a shell as user `developer` with your
-directory at `/<dirname>`; run `claude` (or `clauded` = `claude
---dangerously-skip-permissions`) there.
+Bare `agentdev` launches from a resolvable config (`./agentdev-config.json` or
+`~/.agentdev/config.json`); with neither, pass a mode (e.g. `--clean`) or run
+`agentdev init`. Inside, you get a shell as user `developer` with your directory at
+`/<dirname>`; run `claude` (or `clauded` = `claude --dangerously-skip-permissions`)
+there.
 
-**Run a one-shot command** instead of a shell — everything after `--` runs
-verbatim, and the container exits when it finishes:
+**Run the agent once on a prompt** — put the prompt in a file and pass `--prompt
+<file>` (the only supported way to start the agent on a prompt; see §4a). agentdev
+runs it headless and the container exits when it finishes:
 
 ```bash
-agentdev --clean -- claude --dangerously-skip-permissions -p "fix the failing test"
+echo "fix the failing test" > task.md
+agentdev --clean --prompt task.md
+```
+
+For an arbitrary (non-prompt) command, everything after `--` runs verbatim:
+
+```bash
+agentdev --clean -- bash -lc 'make test'
 ```
 
 **Preview without launching** — prints the settled plan and the exact `podman`
@@ -88,8 +97,8 @@ command:
 agentdev --clean --dry-run
 ```
 
-See the root README's "Run a one-shot command (autonomous agent)" for the full
-autonomous-run contract (auth + permissions).
+To run the agent on a prompt (not a shell or an arbitrary command), use `--prompt`
+— see §4a and the root README's "Run a one-shot command (autonomous agent)".
 
 ## 4. Modes
 
@@ -113,6 +122,36 @@ Rule of thumb: **clean** for reproducible one-shots and experiments; **remember*
 for "learn across runs but start each with a clean transcript"; **profile** for a
 durable, evolving identity.
 
+## 4a. Running the agent on a prompt (`--prompt`)
+
+To start the agent on a task, **write the prompt to a file and pass `--prompt
+<file>`**. This is the only supported way to hand the agent a prompt — there is no
+inline `-p "…"`:
+
+```bash
+cat > task.md <<'EOF'
+Read DESIGN.md and implement the code.
+EOF
+agentdev --profile myproj --prompt task.md
+```
+
+What `--prompt` does:
+
+- Mounts the file read-only in the container and the agent reads it via `"$(cat
+  …)"`, so the prompt text never passes through a shell-quoted argument — any
+  quotes, `$`, or backticks in it are literal.
+- Runs the agent **headless with permissions skipped** and stdin closed, so it
+  neither stalls on approval prompts nor hangs waiting on an interactive terminal.
+- Exits the container (`--rm`) when the task finishes; `agentdev`'s exit status is
+  the agent's.
+
+The file path is optional-relative: `--prompt task.md` resolves against the current
+directory, `--prompt ~/prompts/x.md` is used as given. `--prompt` cannot be combined
+with a `-- command` (that passthrough is for arbitrary, non-prompt commands). Auth
+still follows the mode (§5): in **profile** mode `auto` inherits your host login; in
+**clean**/**remember**, export `ANTHROPIC_API_KEY` and use `--auth api-key-env`.
+Preview any run with `--dry-run` to see the mounted prompt file and resolved auth.
+
 ## 5. Authentication
 
 Set with `--auth <mode>` or `auth.mode` in config. `--login` is shorthand for
@@ -127,8 +166,13 @@ Set with `--auth <mode>` or `auth.mode` in config. `--login` is shorthand for
 
 Notes:
 
-- **Headless `claude -p` needs non-interactive auth.** In clean/remember, export
-  `ANTHROPIC_API_KEY` and use `--auth api-key-env`.
+- **A headless `--prompt` run needs non-interactive auth.** In clean/remember,
+  export `ANTHROPIC_API_KEY` and use `--auth api-key-env`; in a profile, `auto`
+  inherits your host login. `--prompt` handles permissions and stdin itself.
+- **The raw `-- claude` passthrough does not.** If you bypass `--prompt` and run
+  the agent yourself via `-- claude`, you own the headless mechanics: closed stdin
+  (`</dev/null`, or it blocks on a forwarded TTY) and `--dangerously-skip-permissions`
+  (or it stalls on approvals). This is exactly what `--prompt` exists to avoid.
 - **inherit-credentials reuses your subscription login** (token *and* account, so
   connectors and managed settings work) — but it cannot add an OAuth scope your
   host token never had. If `claude doctor` inside reports "subscription auth not
@@ -324,8 +368,8 @@ flag turns it all on:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-...                       # eval uses api-key auth, not a subscription
-agentdev --eval --profile skill-eval -- \
-  claude --dangerously-skip-permissions -p "use the available skills to do X"
+echo "use the available skills to do X" > task.md
+agentdev --eval --profile skill-eval --prompt task.md
 ```
 
 `--eval` sets these (each still overridable by an explicit flag or config):
@@ -430,9 +474,9 @@ sm sync --copy --store ~/eval-skills --agent-home ~/.agentdev/profiles/skill-eva
 ANTHROPIC_API_KEY=$KEY agentdev --eval --profile skill-eval --dry-run
 
 # 4. run the evaluation (writes only to the approved output dir)
+echo "Exercise my-skill on the fixtures in /agentdev and write results to /external/eval-out" > task.md
 ANTHROPIC_API_KEY=$KEY agentdev --eval --rw-allow ~/eval-out \
-  --profile skill-eval -rw ~/eval-out -- \
-  claude --dangerously-skip-permissions -p "Exercise my-skill on the fixtures in /agentdev and write results to /external/eval-out"
+  --profile skill-eval -rw ~/eval-out --prompt task.md
 
 # 5. audit egress
 agentdev report skill-eval
@@ -516,11 +560,11 @@ later; `agentdev doctor` warns when the image is a floating tag.
 
 | Symptom | Cause / fix |
 |---|---|
-| Bare `agentdev` prints usage, doesn't launch | By design — pass a mode (`agentdev --clean`). |
+| Bare `agentdev` prints usage, doesn't launch | No config is resolvable. Bare `agentdev` launches from `./agentdev-config.json` or `~/.agentdev/config.json` when one exists; with neither, pass a mode (`agentdev --clean`) or run `agentdev init`. |
 | `profile is already in use by another agentdev run` | Another run holds it, or a crashed run's container is orphaned. `agentdev profiles gc` reaps orphans; otherwise wait for the other run. |
 | `/mcp` shows "No MCP servers configured" in a profile | The profile isn't signed into claude.ai. Run `claude auth login` inside; it persists. See §5. |
 | `/mcp` shows connectors even in `--clean` | Those are account-level claude.ai connectors following your login, not profile config. See §11. |
-| Headless `claude -p` hangs | Missing `--dangerously-skip-permissions` (per-tool approvals) and/or auth (`--auth api-key-env` + `ANTHROPIC_API_KEY`). See §5–6. |
+| Headless prompt run hangs (no output) | Use `--prompt <file>` — it closes stdin and skips permissions for you. If you instead ran the agent via `-- claude` yourself, append `</dev/null` (else it blocks on a forwarded TTY) and `--dangerously-skip-permissions` (else it stalls on approvals); also check auth. See §4a, §5–6. |
 | `claude doctor`: "subscription auth not active" / "missing user:profile scope" | The inherited host token lacks the scope; `claude auth login` inside the profile mints a fresh one. §5. |
 | Mount "collision" error | Two mounts resolve to the same container path, or you targeted a reserved path. See §7. |
 | Build/env problems | `agentdev doctor` checks podman, image, template, and (for `api-key-env`) the key. |

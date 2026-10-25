@@ -110,6 +110,16 @@ check "config mount renders"      "dryq '$T/ref:/external/cfgref:ro' --clean"
 rm -f agentdev-config.json
 check "collision is fatal"        "! '$AD' --clean -ro '$T/ref' -ro '$T/ref' --dry-run 2>/dev/null"
 
+echo "prompt file (--prompt):"
+printf 'do the thing with "quotes" and $vars and `ticks`\n' > "$T/ws/prompt.txt"
+check "--prompt mounts the file ro" "dryq ':/home/developer/.agentdev-prompt:ro' --clean --prompt '$T/ws/prompt.txt'"
+check "--prompt reads it via cat"   "dryq 'cat.*agentdev-prompt' --clean --prompt '$T/ws/prompt.txt'"
+check "--prompt shown in plan"      "dryq 'prompt file:' --clean --prompt '$T/ws/prompt.txt'"
+check "--prompt relative path ok"   "dryq ':/home/developer/.agentdev-prompt:ro' --clean --prompt prompt.txt"
+check "--prompt + command is fatal" "! '$AD' --clean --prompt '$T/ws/prompt.txt' -- bash --dry-run 2>/dev/null"
+check "missing --prompt is fatal"   "! '$AD' --clean --prompt '$T/no-such.txt' --dry-run 2>/dev/null"
+rm -f "$T/ws/prompt.txt"
+
 echo "json config:"
 mkdir -p "$T/ws/sub"
 cat > agentdev-config.json <<EOF

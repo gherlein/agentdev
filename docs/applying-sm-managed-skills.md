@@ -47,8 +47,8 @@ sm sync --copy --agent-home ~/.agentdev/profiles/research
 #    → ~/.agentdev/profiles/research/.claude/skills/<name>/   (real dirs, each with a .sm-copy marker)
 
 # 3. launch the agent against that profile; it reads the skills as its own
-agentdev --profile research -- \
-  claude --dangerously-skip-permissions -p "use the available skills to …"
+echo "use the available skills to …" > task.md
+agentdev --profile research --prompt task.md
 ```
 
 Inspect or update at any time:

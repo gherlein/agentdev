@@ -29,7 +29,10 @@ else
   # (or --permission-mode acceptEdits) here — otherwise the run stalls on approval
   # prompts. The container's `clauded` alias does NOT apply: this is exec'd directly,
   # not an interactive shell.
-  if ! claude -p "$task" > "$tmp" 2> "$OUT/stderr.log"; then
+  #
+  # `</dev/null` is required: `claude -p` reads stdin, and a forwarded interactive
+  # TTY makes it block forever waiting for input. EOF makes it run on the prompt.
+  if ! claude -p "$task" > "$tmp" 2> "$OUT/stderr.log" </dev/null; then
     cp "$tmp" "$OUT/partial.txt" 2>/dev/null || true
     echo "agent failed; see $OUT/stderr.log" >&2
     exit 1
