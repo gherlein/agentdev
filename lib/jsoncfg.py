@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Tiny JSON reader and schema validator for the agentdev launcher.
 
-The sole config reader: lib/config.sh and lib/mounts.sh descend dotted keys into
-the grouped agentdev-config.json with the verbs below.
+The sole config reader: lib/config.sh and lib/mounts.sh descend into the grouped
+agentdev-config.json with the verbs below.
 
 Usage:
-  jsoncfg.py get      <file> <dotted.key>   -> prints a scalar, exit 1 if missing/not scalar
-  jsoncfg.py list     <file> <dotted.key>   -> prints list items, one per line (exit 1 if missing)
-  jsoncfg.py table    <file> <dotted.key>   -> prints "key\tvalue" lines for an object of scalars
-  jsoncfg.py check    <file>                -> exit 0 if file parses as JSON, else exit 3 + message
-  jsoncfg.py validate <file>                -> exit 0 if file matches SCHEMA, else exit 4 + every error
+  jsoncfg.py get      <file> <dotted.key>          -> prints a scalar (exit 1 if missing/not scalar)
+  jsoncfg.py list     <file> <dotted.key>          -> prints list items, one per line (exit 1 if missing)
+  jsoncfg.py rows     <file> <dotted.key> <f ...>   -> for a list of objects, prints the named fields TAB-separated per row
+  jsoncfg.py has      <file> <dotted.key>          -> exit 0 if the key is present, 1 if not
+  jsoncfg.py check    <file>                        -> exit 0 if the file parses as JSON, else exit 3
+  jsoncfg.py validate <file>                        -> exit 0 if the file matches SCHEMA, else exit 4 + every error
 
 Exit codes: 0 ok; 1 missing/wrong-type; 2 file not found; 3 parse error; 4 schema error.
 
@@ -19,73 +20,61 @@ import json
 import re
 import sys
 
-ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-URL = re.compile(r"^https?://[^/\s:]+(:[0-9]+)?(/\S*)?$")
+TTY = re.compile(r"^/dev/tty[A-Za-z0-9]+$")
 
-# Leaf types: "str", "bool", "url", "env-list", "str-list", "str-map", or a tuple of
-# allowed string values (an enum). A dict is a nested group.
+# Leaf types: "str", "bool", "str-list", a tuple of allowed strings (an enum),
+# "pair-list" (list of {src,dest}), "file-list" (list of {source,name}), or
+# "tty-list" (list of /dev/ttyX strings). A dict is a nested group.
 SCHEMA = {
-    "agent": {
-        "name": ("claude",),
-        "image": "str",
-    },
-    "model": {
-        "id": "str",
-        "provider": ("anthropic", "bedrock", "vertex"),
-        "base_url": "url",
-        "pass_env": "env-list",
-    },
-    "prompt": {
-        "file": "str",
-    },
-    "profile": {
-        "mode": ("clean", "remember", "profile"),
-        "name": "str",
-        "memory_store": "str",
-        "keep": "bool",
-        "profiles_root": "str",
-        "clean_root": "str",
-        "memory_root": "str",
-    },
-    "template": {
-        "source": "str",
-        "include": "str-list",
-    },
-    "auth": {
-        "mode": ("auto", "api-key-env", "interactive", "inherit-credentials"),
-    },
+    "image": "str",
     "workspace": {
         "source": "str",
-        "trust": ("skip-permissions", "workspace-only", "prompt"),
-        "workdir": "str",
+        "mount": "str",
+        "mode": ("rw", "ro"),
+        "ssh": "bool",
+        "usb": "bool",
+        "files": "file-list",
     },
     "network": {
-        "mode": ("off", "allowlist", "none"),
+        "mode": ("off", "none", "allowlist"),
         "allow": "str-list",
         "log": "bool",
         "mitm": "bool",
     },
     "mounts": {
-        "workspace": ("rw", "ro"),
-        "confirm_rw": "bool",
-        "rw_allow": "str-list",
-        "read_only": "str-map",
-        "read_write": "str-map",
-        "devices": "str-list",
+        "agent_folder": "str",
+        "read_only": "pair-list",
+        "read_write": "pair-list",
+        "history": "str",
+        "memory": "str",
+        "tty_devices": "tty-list",
     },
-    "sandbox": {
-        "ssh": "bool",
-        "usb": "bool",
-        "host_ca": "bool",
+    "one-shot": {
+        "agent": ("claude", "omp", "pi"),
+        "model": "str",
+        "prompt": "str",
     },
 }
 
 # Keys from earlier config versions, so a stale file gets a pointed message.
 RETIRED = {
-    "profile.default_mode": "renamed to profile.mode",
-    "workspace.isolation": "removed (only the bind-mounted workspace exists)",
-    "template.strategy": "removed (only the copy strategy exists)",
+    "agent": "removed; the agent is now one-shot.agent (a short name: claude | omp | pi)",
+    "model": "removed; the model is now one-shot.model (routing via .env/.envrc)",
+    "prompt": "removed; use one-shot.prompt or the --prompt flag",
+    "profile": "removed; mount the agent home with mounts.agent_folder (no modes)",
+    "template": "removed; copy a starter kit from templates/<agent>/ by hand",
+    "auth": "removed; credentials come from a .env/.envrc in the workspace",
+    "sandbox": "removed; ssh/usb moved to workspace.ssh / workspace.usb (host_ca dropped)",
+    "workspace.workdir": "removed; the agent starts at the workspace root",
+    "workspace.trust": "removed; one-shot runs skip permissions, interactive runs decide inside",
+    "mounts.devices": "renamed to mounts.tty_devices (each must be /dev/ttyX)",
+    "mounts.confirm_rw": "removed",
+    "mounts.rw_allow": "removed",
+    "mounts.workspace": "removed; the workspace mount mode is workspace.mode",
+    "mounts.copy_files": "removed; inject files with workspace.files",
 }
+
+PAIR_KEYS = {"pair-list": ("src", "dest"), "file-list": ("source", "name")}
 
 
 def load(path):
@@ -107,28 +96,40 @@ def check_leaf(path, kind, value, errors):
     if isinstance(kind, tuple):
         if not isinstance(value, str) or value not in kind:
             errors.append(f"{path}: must be one of {', '.join(kind)} (got {json.dumps(value)})")
-        return
-    if kind == "str":
+    elif kind == "str":
         if not isinstance(value, str):
             errors.append(f"{path}: must be a string (got {json.dumps(value)})")
     elif kind == "bool":
         if not isinstance(value, bool):
             errors.append(f"{path}: must be true or false (got {json.dumps(value)})")
-    elif kind == "url":
-        if not isinstance(value, str) or not URL.match(value):
-            errors.append(f"{path}: must be an http(s) URL with a host (got {json.dumps(value)})")
-    elif kind in ("str-list", "env-list"):
-        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-            errors.append(f"{path}: must be a list of strings (got {json.dumps(value)})")
+    elif kind == "str-list":
+        if not isinstance(value, list) or not all(isinstance(i, str) for i in value):
+            errors.append(f"{path}: must be a list of strings")
+    elif kind == "tty-list":
+        if not isinstance(value, list) or not all(isinstance(i, str) for i in value):
+            errors.append(f"{path}: must be a list of strings")
             return
-        if kind == "env-list":
-            for item in value:
-                if not ENV_NAME.match(item):
-                    errors.append(f"{path}: '{item}' is not a valid environment variable name")
-    elif kind == "str-map":
-        if not isinstance(value, dict) or not all(
-                isinstance(v, str) for k, v in value.items() if not is_comment(k)):
-            errors.append(f"{path}: must be an object of \"source\": \"destination\" strings")
+        for item in value:
+            if not TTY.match(item):
+                errors.append(f"{path}: '{item}' must be a /dev/ttyX device node")
+    elif kind in PAIR_KEYS:
+        a, b = PAIR_KEYS[kind]
+        if not isinstance(value, list):
+            errors.append(f"{path}: must be a list of {{ {a}, {b} }} objects")
+            return
+        for idx, item in enumerate(value):
+            where = f"{path}[{idx}]"
+            if not isinstance(item, dict):
+                errors.append(f"{where}: must be a {{ {a}, {b} }} object")
+                continue
+            for req in (a, b):
+                if not isinstance(item.get(req), str):
+                    errors.append(f"{where}: missing string \"{req}\"")
+            for extra in item:
+                if is_comment(extra):
+                    continue
+                if extra not in (a, b):
+                    errors.append(f"{where}: unknown key \"{extra}\"")
     else:
         raise AssertionError(f"unknown schema kind {kind!r}")
 
@@ -158,8 +159,8 @@ def descend(data, dotted):
         if isinstance(cur, dict) and part in cur:
             cur = cur[part]
         else:
-            sys.exit(1)
-    return cur
+            return None, False
+    return cur, True
 
 
 def fmt_scalar(val):
@@ -188,10 +189,15 @@ def main(argv):
         sys.stderr.write("error: missing key\n")
         return 3
     data = load(path)
-    value = descend(data, argv[2])
+    value, found = descend(data, argv[2])
+
+    if mode == "has":
+        return 0 if found else 1
+    if not found:
+        return 1
 
     if mode == "get":
-        if isinstance(value, bool) or isinstance(value, (str, int, float)):
+        if isinstance(value, (bool, str, int, float)):
             print(fmt_scalar(value))
             return 0
         return 1
@@ -201,15 +207,15 @@ def main(argv):
                 print(fmt_scalar(item))
             return 0
         return 1
-    if mode == "table":
-        if isinstance(value, dict):
-            for key, val in value.items():
-                if is_comment(key):
-                    continue
-                if isinstance(val, bool) or isinstance(val, (str, int, float)):
-                    print(f"{key}\t{fmt_scalar(val)}")
-            return 0
-        return 1
+    if mode == "rows":
+        fields = argv[3:]
+        if not isinstance(value, list) or not fields:
+            return 1
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            print("\t".join(fmt_scalar(item.get(f, "")) for f in fields))
+        return 0
 
     sys.stderr.write(f"error: unknown mode '{mode}'\n")
     return 3

@@ -34,10 +34,10 @@ Two signals, and one is free:
   atomic rename (temp file → `mv` in the same dir), so the master never reads a
   partial result. Data IPC is files; the directory is a per-run `-rw` mount.
 
-Because each task runs in **clean mode**, every container gets its own throwaway
-home, takes no profile lock, and runs fully concurrently — no single-instance
-contention (see `DESIGN.md` §2.5). The channel dir is *our* host directory, not
-the profile, so results survive the container's `--rm` teardown.
+Because each task runs **ephemerally** (no `mounts.agent_folder`), every container gets
+its own throwaway home, takes no lock, and runs fully concurrently — no single-instance
+contention (see `DESIGN.md` §7). The channel dir is *our* host directory, mounted
+read-write, so results survive the container's `--rm` teardown.
 
 ## Files
 
@@ -86,8 +86,10 @@ at startup). `agentdev.log` and `stderr.log` sit beside each result for failures
 | `MAXJOBS` | `4` | Max concurrent containers |
 | `WORKSPACE` | fresh temp dir | Host dir mounted as the agent's workspace. Point it at a repo if the task needs code (note: it is mounted **read-write** and shared by all workers in a run — use a copy per worker if they must not collide) |
 | `CHANNEL_ROOT` | fresh temp dir | Where per-run `in/`,`out/` channels live |
-| `AGENTDEV_AUTH` | `api-key-env` | `auth.mode` written into each worker's config |
 | `AGENTDEV` | `agentdev` | The binary to invoke (the selftest overrides this) |
+
+Credentials come from a `.env`/`.envrc` in the workspace (e.g. `ANTHROPIC_API_KEY=…`);
+the workers are ephemeral (no `mounts.agent_folder`).
 
 ## Passing the task
 
@@ -105,7 +107,7 @@ Do **not** have a worker create another agentdev container *inside itself*:
 - It is not supported by default — the image runs unprivileged with no
   `/dev/fuse`, so nested rootless podman typically fails, and neither the
   `agentdev` launcher nor its image is present inside a worker.
-- Even forced to work, the nested container's profile and workspace live inside
+- Even forced to work, the nested container's home and workspace live inside
   the outer container (ephemeral, lost on exit, a second overlay layer).
 - Agents nesting agents have no central concurrency limit — a container
   fork-bomb.
@@ -128,7 +130,7 @@ concurrency and cleanup — launches the new siblings. Keep the topology flat.
   `in/` between turns, and turn `ctl` into a Unix-domain socket for a real duplex
   protocol. This is the point where a background process inside the container earns
   its keep — but it is a bigger design than this example.
-- **Shared identity across workers.** If the tasks should build on one profile's
-  memory/config, `cp -a base wN` per worker (each fork is its own single-instance
-  folder, pointed at by that worker's `profile.name`/`profiles_root`) instead of
-  clean mode.
+- **Shared identity across workers.** If the tasks should build on one agent home's
+  memory/config, `cp -a base wN` per worker and point each worker's
+  `mounts.agent_folder` at its own fork (each fork is its own single-instance home)
+  instead of running ephemerally.

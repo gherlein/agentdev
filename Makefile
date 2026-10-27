@@ -7,7 +7,7 @@ PREFIX     ?= $(HOME)/.local
 BINDIR     := $(PREFIX)/bin
 
 SHELLS  := agentdev $(wildcard lib/*.sh) image/entrypoint.sh scripts/release.sh tests/smoke.sh tests/live.sh tests/live-agent.sh
-PYFILES := lib/jsoncfg.py lib/allowcheck.py image/proxy.py tests/matrix.py tests/test_proxy.py
+PYFILES := lib/jsoncfg.py image/proxy.py tests/matrix.py tests/test_proxy.py
 
 .DEFAULT_GOAL := help
 
@@ -37,7 +37,7 @@ test: ## Run the offline suite: smoke + option-permutation matrix (docs/testing-
 run-tests: test ## Alias for `test` (the default offline suite; CI entrypoint)
 
 .PHONY: matrix
-matrix: ## Run just the profile-option permutation matrix (offline, dry-run based)
+matrix: ## Run just the config-permutation matrix (offline, dry-run based)
 	python3 ./tests/matrix.py
 
 .PHONY: test-live
@@ -45,7 +45,7 @@ test-live: ## Tier B: launch real containers to verify enforcement (needs podman
 	./tests/live.sh
 
 .PHONY: test-live-agent
-test-live-agent: ## Tier C: drive a real agent to verify profile memory/history persistence (needs host login; real model cost)
+test-live-agent: ## Tier C: drive a real agent to verify agent-home persistence (needs ANTHROPIC_API_KEY; real model cost)
 	./tests/live-agent.sh
 
 .PHONY: lint

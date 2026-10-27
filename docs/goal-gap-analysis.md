@@ -1,14 +1,15 @@
 # Goal vs. Implementation: Gap Analysis
 
-> **Historical (2026-10-25).** This was the "before" picture that drove the redesign. The
-> gaps below have since been addressed: one strict, fail-closed config file is now the whole
-> truth (`-c` / `$AGENTDEV_CONFIG` / `./agentdev-config.json`, no user-config layer, no env
-> mounts); model selection (id / provider / base_url / forwarded credentials) is implemented
-> with an allowlist interlock; the one-shot prompt has a `prompt.file` key; the CLI is just
-> `--dry-run` / `-c` / `--prompt`; and the management subcommands were removed. Agent
-> selection beyond Claude Code is the remaining "Next" item. See
-> [`VISION.md`](../VISION.md), [`DESIGN.md`](../DESIGN.md), and
-> [`user-guide.md`](./user-guide.md) for the current design. Kept for the record.
+> **Historical (2026-10-25).** This was the "before" picture that drove the redesign, and it
+> has since been superseded twice. The current design is: one strict, fail-closed config file
+> (`-c` / `$AGENTDEV_CONFIG` / `./agentdev-config.json`); a run is interactive by default or
+> headless via a `one-shot` block (`agent`, `model`, `prompt`); the agent's state is just host
+> folders you mount (`mounts.agent_folder`, with optional `history`/`memory` redirects);
+> credentials and model routing come from a `.env`/`.envrc` in the workspace (no `auth`/model
+> object); agents are selected by short name (claude/omp/pi); and the CLI is `--dry-run` / `-c`
+> / `--prompt` / `-- command`. The specifics below (profile modes, auth modes, model object,
+> template seeding) are **obsolete**. See [`README.md`](../README.md), [`VISION.md`](../VISION.md),
+> and [`DESIGN.md`](../DESIGN.md) for the current design. Kept for the record.
 
 *Reviewed 2026-10-25 against commit `4720ac4`.*
 

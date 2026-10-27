@@ -1,5 +1,5 @@
 #!/bin/bash
-# net.sh - egress isolation for agentdev (VISION §10).
+# net.sh - egress isolation for agentdev (VISION §5).
 #
 # Modes (NET_MODE): off (host/default networking), none (no network at all),
 # allowlist (only listed destinations reachable, via a filtering proxy sidecar).
@@ -8,18 +8,20 @@
 #   - an INTERNAL podman network (no route out) that the agent container joins;
 #   - a proxy sidecar joined to BOTH that internal network and a normal (egress)
 #     network, so it alone can reach the outside;
-#   - the agent is pointed at the proxy via HTTP(S)_PROXY and has no other route,
-#     so a client that ignores the proxy cannot reach anything.
+#   - the agent is pointed at the proxy via HTTP(S)_PROXY and has no other route.
 #
-# Sets NET_ARGS (podman args for the agent container). Records PROXY_NAME /
-# NET_INT / NET_EXT / NET_WORKDIR for teardown_network. Requires: podman,
-# sha256sum, openssl (only for MITM); globals NET_MODE NET_ALLOW[] NET_LOG
-# NET_MITM IMAGE RUN_ID PROFILE DRY_RUN.
+# Model routing lives in .env/.envrc, so agentdev does not derive the model endpoint:
+# under allowlist you add the model host to network.allow yourself.
+#
+# Sets NET_ARGS (podman args for the agent). Records PROXY_NAME / NET_INT / NET_EXT /
+# NET_WORKDIR for teardown. The egress log (network.log) is written into the agent
+# home (mounts.agent_folder); without an agent_folder it is ephemeral. Requires:
+# podman, sha256sum, openssl (MITM only); globals NET_MODE NET_ALLOW[] NET_LOG
+# NET_MITM IMAGE RUN_ID MNT_AGENT_FOLDER DRY_RUN.
 
 NET_ARGS=()
-PROXY_NAME=""; NET_INT=""; NET_EXT=""; NET_WORKDIR=""; EGRESS_LOG=""
+PROXY_NAME=""; NET_INT=""; NET_EXT=""; NET_WORKDIR=""
 
-# setup_network - resolve NET_ARGS and, unless --dry-run, bring up the network.
 setup_network() {
   NET_ARGS=()
   case "$NET_MODE" in
@@ -31,6 +33,7 @@ setup_network() {
 
   if [[ ${#NET_ALLOW[@]} -eq 0 ]]; then
     echo "Error: network.mode=allowlist but network.allow is empty." >&2
+    echo "       Add hosts to network.allow, or set network.mode to none for no egress." >&2
     exit 1
   fi
 
@@ -39,7 +42,6 @@ setup_network() {
   NET_EXT="agentdev-ext-$id"
   PROXY_NAME="agentdev-proxy-$id"
   NET_WORKDIR="${XDG_RUNTIME_DIR:-/tmp}/agentdev-net-$id"
-  EGRESS_LOG="$PROFILE/agentdev-egress.log"
 
   NET_ARGS=(
     --network "$NET_INT"
@@ -48,8 +50,6 @@ setup_network() {
     -e "NO_PROXY=localhost,127.0.0.1" -e "no_proxy=localhost,127.0.0.1"
   )
   if [[ "$NET_MITM" == true ]]; then
-    # The agent must trust the MITM CA. Point the common toolchains' CA envs at it
-    # (avoids colliding with the reserved host-CA mount target).
     NET_ARGS+=(
       -v "$NET_WORKDIR/ca.crt:/etc/agentdev/mitm-ca.crt:ro"
       -e "NODE_EXTRA_CA_CERTS=/etc/agentdev/mitm-ca.crt"
@@ -66,13 +66,19 @@ setup_network() {
   printf '%s\n' "${NET_ALLOW[@]}" > "$allow_file"
 
   local proxy_env=(-e PROXY_ALLOW_FILE=/etc/agentdev/allow.txt -e PROXY_PORT=8080)
-  # proxy.py is baked into the image (/usr/local/bin/agentdev-proxy.py), so the
-  # sidecar is self-contained and pinned to the image digest — no host copy.
-  local proxy_vols=(
-    -v "$allow_file:/etc/agentdev/allow.txt:ro"
-    -v "$PROFILE:/hostprofile:rw"
-  )
-  [[ "$NET_LOG" == true ]] && proxy_env+=(-e PROXY_LOG_FILE=/hostprofile/agentdev-egress.log)
+  local proxy_vols=(-v "$allow_file:/etc/agentdev/allow.txt:ro")
+
+  # Egress log: into the agent home if there is one, else ephemeral under NET_WORKDIR.
+  if [[ "$NET_LOG" == true ]]; then
+    local log_home="$MNT_AGENT_FOLDER"
+    if [[ -z "$log_home" ]]; then
+      log_home="$NET_WORKDIR/egress-home"
+      echo "Note: network.log is on but mounts.agent_folder is unset; the egress log will be ephemeral." >&2
+    fi
+    mkdir -p "$log_home"
+    proxy_vols+=(-v "$log_home:/egress-home:rw")
+    proxy_env+=(-e PROXY_LOG_FILE=/egress-home/agentdev-egress.log)
+  fi
 
   if [[ "$NET_MITM" == true ]]; then
     command -v openssl >/dev/null || { echo "Error: network.mitm=true needs openssl on the host." >&2; exit 1; }
@@ -85,7 +91,7 @@ setup_network() {
 
   podman network create --internal --label "agentdev.net=$id" "$NET_INT" >/dev/null
   podman network create          --label "agentdev.net=$id" "$NET_EXT" >/dev/null
-  if ! podman run -d --pull=missing --name "$PROXY_NAME" --label "agentdev.proxy=$PROFILE" --label "agentdev.net=$id" \
+  if ! podman run -d --pull=missing --name "$PROXY_NAME" --label "agentdev.proxy=$id" --label "agentdev.net=$id" \
          --network "$NET_INT" --network "$NET_EXT" \
          "${proxy_vols[@]}" "${proxy_env[@]}" "$IMAGE" python3 /usr/local/bin/agentdev-proxy.py >/dev/null; then
     echo "Error: failed to start egress proxy sidecar." >&2
@@ -95,8 +101,7 @@ setup_network() {
   echo "Network: allowlist via proxy ($PROXY_NAME), ${#NET_ALLOW[@]} rule(s)$( [[ "$NET_MITM" == true ]] && echo ', MITM on' )." >&2
 }
 
-# teardown_network - remove the proxy sidecar and networks. set -u-safe and
-# idempotent; called from the launcher's EXIT trap.
+# teardown_network - remove the proxy sidecar and networks. set -u-safe, idempotent.
 teardown_network() {
   [[ "${NET_MODE:-off}" == allowlist ]] || return 0
   [[ -n "${PROXY_NAME:-}" ]] && podman rm -f "$PROXY_NAME" >/dev/null 2>&1 || true
@@ -105,7 +110,7 @@ teardown_network() {
   [[ -n "${NET_WORKDIR:-}" && -d "$NET_WORKDIR" ]] && rm -rf "$NET_WORKDIR" || true
 }
 
-# The egress log (network.log=true) is a plain tab-separated file in the profile at
-# <profile>/agentdev-egress.log:  ISO8601 <TAB> ALLOW|DENY <TAB> METHOD <TAB> host:port <TAB> path
+# The egress log (network.log=true) is a plain tab-separated file at
+# <agent_folder>/agentdev-egress.log:  ISO8601 <TAB> ALLOW|DENY <TAB> METHOD <TAB> host:port <TAB> path
 # Read it with ordinary tools, e.g. a per-destination tally:
-#   cut -f2,4 <profile>/agentdev-egress.log | sort | uniq -c | sort -rn
+#   cut -f2,4 <agent_folder>/agentdev-egress.log | sort | uniq -c | sort -rn

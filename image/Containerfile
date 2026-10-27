@@ -8,7 +8,7 @@
 FROM debian:bookworm-slim
 
 LABEL org.opencontainers.image.title="agentdev" \
-      org.opencontainers.image.description="Isolated, profile-backed dev container for Claude Code (and later other agents), with the herdr orchestrator, Node, Go, and the full localdev toolset" \
+      org.opencontainers.image.description="Isolated, config-driven dev container for coding agents (Claude Code, omp, pi), with the herdr orchestrator, Node, Go, and the full localdev toolset" \
       org.opencontainers.image.source="https://github.com/gherlein/agentdev" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.vendor="Greg Herlein" \

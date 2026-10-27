@@ -21,8 +21,8 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$cfg" && ${#cmd[@]} -gt 0 ]] || { echo "fake-agentdev: bad args" >&2; exit 64; }
 
-# Read the single read_write mapping from the config: source(host) -> dest(container).
-read -r rwdir dest < <(python3 -c 'import json,sys; m=json.load(open(sys.argv[1]))["mounts"]["read_write"]; k=next(iter(m)); print(k, m[k])' "$cfg")
+# Read the single read_write pair from the config: { src(host), dest(container) }.
+read -r rwdir dest < <(python3 -c 'import json,sys; a=json.load(open(sys.argv[1]))["mounts"]["read_write"][0]; print(a["src"], a["dest"])' "$cfg")
 translated=()
 for a in "${cmd[@]}"; do translated+=("${a//$dest/$rwdir}"); done
 

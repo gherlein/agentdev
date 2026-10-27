@@ -1,19 +1,18 @@
 #!/bin/bash
-# agentdev - run a coding agent (Claude Code so far) in an isolated container. One
-# JSON config file defines the launch: the agent, the model, an optional one-shot
-# prompt, every host folder mounted (and whether read-only), and how much network
-# the container gets. The agent's home is a swappable profile folder on the host;
-# agentdev never versions it.
+# agentdev - run a coding agent (Claude Code, omp, or pi) in an isolated container.
+# One JSON config file defines the launch: the workspace, the network reach, the
+# folders mounted in, and — for a headless run — the agent and model. By default a
+# run is interactive (a shell you drive); add a one-shot block to run the agent
+# headless on a prompt, then exit.
 #
 # See VISION.md and DESIGN.md. This launcher owns arg parsing and the podman
-# invocation; lib/*.sh hold config, mounts, model, seeding, profiles, memory,
-# network, and metadata.
+# invocation; lib/*.sh hold config, mounts, the agent table, and the network.
 set -euo pipefail
 
 SELFDIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 LIBDIR="$SELFDIR/lib"
 
-for m in config mounts model meta seed memory profile net; do
+for m in config agents mounts net; do
   # shellcheck source=/dev/null
   source "$LIBDIR/$m.sh"
 done
@@ -22,9 +21,9 @@ usage() {
   cat <<'EOF'
 Usage: agentdev [--dry-run] [-c <config>] [--prompt <file>] [-- COMMAND...]
 
-agentdev launches a coding agent (Claude Code) in an isolated container. One JSON
-config file defines the whole run: the agent, the model, an optional one-shot prompt,
-every mounted folder (and whether read-only), and how much network the container gets.
+agentdev launches a coding agent in an isolated container. One JSON config file
+defines the whole run. By default the run is interactive (a shell); add a "one-shot"
+block (or pass --prompt) to run the agent headless on a prompt and exit.
 
 The config file is chosen in this order:
   1. -c / --config <path>
@@ -35,45 +34,60 @@ It is validated fail-closed: an unknown key or invalid value aborts before launc
 Options (the only ones):
   -c, --config <path>   select the config file
   --dry-run             print the settled plan and the podman command; launch nothing
-  --prompt <file>       run the agent once, headless, on the prompt in <file>
-                        (overrides prompt.file; relative to the current directory)
-  -- COMMAND...         run COMMAND instead of the shell (not with a prompt)
+  --prompt <file>       run one-shot on the prompt in <file> (sets/overrides one-shot.prompt)
+  -- COMMAND...         run COMMAND instead of the interactive shell (not with a prompt)
 
-Profiles and memory stores are plain folders (profile.profiles_root / memory_root);
-manage them with ordinary tools (cp, rm, tar, git). Build the image with `make build`.
-See docs/user-guide.md and examples/ for configs.
+Agent homes are plain folders (mounts.agent_folder); manage them with cp, rm, tar, git.
+Build the image with `make build`. See docs/user-guide.md and examples/.
 EOF
 }
 
-# removed_flag FLAG - flags that used to override config keys now fail with the key
-# to set instead, so a stale invocation cannot silently run with different policy.
+# removed_flag FLAG - flags that used to override config now fail with the key to set.
 removed_flag() {
   local flag="${1%%=*}" key
   case "$flag" in
-    --clean|--remember|--profile) key="profile.mode (and profile.name / profile.memory_store)" ;;
-    --keep)          key="profile.keep" ;;
-    --template)      key="template.source" ;;
-    --auth|--login)  key="auth.mode" ;;
-    --trust)         key="workspace.trust" ;;
-    --workdir)       key="workspace.workdir" ;;
-    --net)           key="network.mode" ;;
-    --confirm-rw)    key="mounts.confirm_rw" ;;
-    --rw-allow)      key="mounts.rw_allow" ;;
-    --workspace-ro)  key="mounts.workspace" ;;
-    --no-ssh)        key="sandbox.ssh" ;;
-    -ro|-rw)         key="mounts.read_only / mounts.read_write" ;;
-    --eval)          key="the policy keys directly (see examples/isolated/agentdev-config.json)" ;;
-    --reseed)        echo "Error: --reseed was removed; a profile is seeded once. To re-seed, delete the profile folder and relaunch." >&2; exit 1 ;;
-    *)               return 1 ;;
+    --clean|--remember|--profile|--keep) key="mounts.agent_folder (there are no modes)" ;;
+    --template)              key="nothing; copy a starter kit from templates/<agent>/" ;;
+    --auth|--login)          key="nothing; credentials come from a .env/.envrc in the workspace" ;;
+    --trust)                 key="nothing; one-shot skips permissions, interactive decides inside" ;;
+    --workdir)               key="nothing; the agent starts at the workspace root" ;;
+    --net)                   key="network.mode" ;;
+    --no-ssh)                key="workspace.ssh" ;;
+    -ro|-rw)                 key="mounts.read_only / mounts.read_write" ;;
+    *)                       return 1 ;;
   esac
   echo "Error: $flag was removed; set $key in the config file." >&2
   exit 1
 }
 
+# new_run_id - a unique id for this run's network objects.
+new_run_id() { printf '%s-%s\n' "$(date -u +%Y%m%dT%H%M%S)" "$(head -c4 /dev/urandom | od -An -tx1 | tr -d ' \n')"; }
+
+# lock_home PATH - exclusive, non-blocking lock so a shared agent home is not launched
+# twice at once. Sets HOME_LOCK_FD; the fd is closed in the podman child.
+lock_home() {
+  local path="$1"
+  mkdir -p "$path"
+  exec {HOME_LOCK_FD}>"$path/.agentdev.lock-file"
+  if ! flock -n "$HOME_LOCK_FD"; then
+    echo "Error: agent home is already in use by another agentdev run: $path" >&2
+    exit 1
+  fi
+}
+
+# assert_home_free PATH - refuse if a live container is already mounting this home.
+assert_home_free() {
+  local path="$1" cid
+  cid=$(podman ps --filter "label=agentdev.home=$path" --format '{{.ID}}' 2>/dev/null | head -n1)
+  if [[ -n "$cid" ]]; then
+    echo "Error: agent home is in use by a running container: $path" >&2
+    echo "       container: $cid   (remove an orphan with: podman rm -f $cid)" >&2
+    exit 1
+  fi
+}
+
 # --- launch -----------------------------------------------------------------
 launch() {
-  # KEEP, cleanup, PROFILE, RUN_ID, MEMORY_STORE, MOUNTS_TMPFILE are global on
-  # purpose: the EXIT trap reads them after this function has already returned.
   local PROMPT_CLI="" PROMPT_FILE="" PROMPT_MOUNT=()
   local COMMAND=()
   DRY_RUN=no
@@ -99,239 +113,89 @@ launch() {
     exit 1
   fi
 
-  # The workspace: an existing host folder, mounted at /<basename>. Refuse names
-  # that would shadow a critical container path (and nest the profile inside it).
+  # The workspace: an existing host folder, mounted at /<mount>.
   WS_SOURCE="$(resolve_dir "$WS_SOURCE" "workspace.source")"
-  DIR_NAME="$(basename "$WS_SOURCE")"
+  DIR_NAME="${WS_MOUNT:-$(basename "$WS_SOURCE")}"
+  case "$DIR_NAME" in
+    */*|"") echo "Error: workspace.mount must be a single path segment: '$DIR_NAME'" >&2; exit 1 ;;
+  esac
   case " / home root etc usr bin sbin lib lib64 dev proc sys var tmp opt mnt run srv boot " in
     *" $DIR_NAME "*)
-      echo "Error: workspace basename '$DIR_NAME' collides with a system path" >&2
-      echo "       (workspace would mount at /$DIR_NAME). Point workspace.source elsewhere." >&2
+      echo "Error: workspace name '$DIR_NAME' collides with a system path (would mount at /$DIR_NAME)." >&2
       exit 1 ;;
   esac
+  ENC="-${DIR_NAME//./-}"
 
-  # The one-shot prompt: --prompt (relative to the current directory) overrides
-  # prompt.file (relative to the config). The file is mounted read-only and the agent
-  # reads it via command substitution, so the prompt text never passes through a
-  # shell-quoted argument and stdin is closed (no interactive-TTY hang).
-  if [[ -n "$PROMPT_CLI" ]]; then
-    PROMPT_FILE="$(expand_tilde "$PROMPT_CLI")"
-    [[ "$PROMPT_FILE" == /* ]] || PROMPT_FILE="$PWD/$PROMPT_FILE"
-  else
-    PROMPT_FILE="$CFG_PROMPT_FILE"
+  # Decide interactive vs one-shot. A one-shot block, or --prompt, means headless.
+  local RUN_MODE=interactive
+  if [[ "$HAVE_ONESHOT" == yes || -n "$PROMPT_CLI" ]]; then
+    RUN_MODE=one-shot
   fi
-  if [[ -n "$PROMPT_FILE" ]]; then
+
+  if [[ "$RUN_MODE" == one-shot ]]; then
+    agent_known "$OS_AGENT" || { echo "Error: one-shot.agent '$OS_AGENT' is not a supported agent (claude | omp | pi)." >&2; exit 1; }
     if [[ ${#COMMAND[@]} -gt 0 ]]; then
-      echo "Error: a prompt (--prompt or prompt.file) cannot be combined with a '-- command'." >&2; exit 1
+      echo "Error: a one-shot run cannot be combined with a '-- command'." >&2; exit 1
     fi
-    [[ -f "$PROMPT_FILE" && -r "$PROMPT_FILE" ]] || {
-      echo "Error: prompt file not found or unreadable: $PROMPT_FILE" >&2; exit 1; }
+    if [[ -n "$PROMPT_CLI" ]]; then
+      PROMPT_FILE="$(expand_tilde "$PROMPT_CLI")"
+      [[ "$PROMPT_FILE" == /* ]] || PROMPT_FILE="$PWD/$PROMPT_FILE"
+    else
+      PROMPT_FILE="$OS_PROMPT"
+    fi
+    [[ -n "$PROMPT_FILE" ]] || { echo "Error: a one-shot run needs a prompt (one-shot.prompt or --prompt <file>)." >&2; exit 1; }
+    [[ -f "$PROMPT_FILE" && -r "$PROMPT_FILE" ]] || { echo "Error: prompt file not found or unreadable: $PROMPT_FILE" >&2; exit 1; }
     PROMPT_FILE="$(realpath "$PROMPT_FILE")"
     PROMPT_MOUNT=(-v "$PROMPT_FILE:/home/developer/.agentdev-prompt:ro")
-    COMMAND=(bash -lc 'claude --dangerously-skip-permissions -p "$(cat /home/developer/.agentdev-prompt)" </dev/null')
-  fi
-
-  # Resolve the profile name / memory store for the mode.
-  local MEMORY_NAME="default"
-  PROFILE_NAME=""
-  case "$MODE" in
-    profile)
-      PROFILE_NAME="$CFG_PROFILE_NAME"
-      if [[ -z "$PROFILE_NAME" ]]; then
-        echo "Error: profile.mode=profile needs profile.name." >&2
-        exit 1
-      fi ;;
-    remember)
-      MEMORY_NAME="${CFG_MEMORY_STORE:-default}" ;;
-  esac
-
-  KEEP=no
-  [[ "$CFG_KEEP" == true ]] && KEEP=yes
-
-  # Resolve the container working directory. Empty or "." = the workspace root
-  # (/<DIR_NAME>); a relative path resolves under it; an absolute path is used as
-  # given. When the target lives inside the workspace mount we can (and do) verify
-  # it exists on the host, so a typo fails before the container starts.
-  local CONTAINER_WORKDIR="/$DIR_NAME" wd="${WS_WORKDIR#./}"
-  wd="${wd%/}"
-  if [[ -n "$wd" && "$wd" != "." ]]; then
-    case "$wd" in
-      /*) CONTAINER_WORKDIR="$wd" ;;
-      *)  CONTAINER_WORKDIR="/$DIR_NAME/$wd" ;;
-    esac
-  fi
-  case "$CONTAINER_WORKDIR" in
-    "/$DIR_NAME"|"/$DIR_NAME/"*)
-      local rel="${CONTAINER_WORKDIR#"/$DIR_NAME"}"; rel="${rel#/}"
-      local host_wd="$WS_SOURCE${rel:+/$rel}"
-      if [[ ! -d "$host_wd" ]]; then
-        echo "Error: entry folder does not exist: $host_wd" >&2
-        echo "       (workspace.workdir = '$WS_WORKDIR'; create it or fix the path)." >&2
-        exit 1
-      fi ;;
-  esac
-
-  # Model selection and, for an allowlist, the endpoint interlock.
-  setup_model
-
-  # Resolve how we actually authenticate. A non-Anthropic provider authenticates
-  # with its own credentials (model.pass_env). Otherwise, 'auto' detects what this
-  # host uses natively: an env API key, else (for a persistent profile) the host's
-  # subscription login, else an interactive login.
-  HOST_CREDS="$HOME/.claude/.credentials.json"
-  AUTH_EFFECTIVE="$AUTH_MODE"
-  if [[ "$MODEL_PROVIDER" != anthropic ]]; then
-    if [[ "$AUTH_MODE" != auto ]]; then
-      echo "Error: model.provider=$MODEL_PROVIDER authenticates via model.pass_env; set auth.mode to auto (or omit it)." >&2
-      exit 1
-    fi
-    AUTH_EFFECTIVE=provider-env
-  elif [[ "$AUTH_MODE" == auto ]]; then
-    if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
-      AUTH_EFFECTIVE=api-key-env
-    elif [[ "$MODE" == profile && -r "$HOST_CREDS" ]]; then
-      AUTH_EFFECTIVE=inherit-credentials
-    else
-      AUTH_EFFECTIVE=interactive
-    fi
-    echo "Auth: auto -> $AUTH_EFFECTIVE" >&2
-  fi
-
-  # inherit-credentials copies a secret into the profile, so it is valid only for a
-  # named (kept) profile. Refuse it for a throwaway home (clean/remember) fail-closed
-  # rather than silently switching modes: an explicit auth.mode is never ignored
-  # (VISION §7, §10). Note this branch is only reachable when auth.mode was set to
-  # inherit-credentials explicitly; 'auto' never resolves to it outside profile mode.
-  if [[ "$AUTH_EFFECTIVE" == inherit-credentials && "$MODE" != profile ]]; then
-    echo "Error: auth.mode=inherit-credentials is valid only with profile.mode=profile." >&2
-    echo "       A throwaway home ($MODE) must not hold a copied credential. Use profile" >&2
-    echo "       mode, or set auth.mode to api-key-env or interactive." >&2
-    exit 1
-  fi
-  if [[ "$AUTH_EFFECTIVE" == inherit-credentials && ! -r "$HOST_CREDS" ]]; then
-    echo "Error: auth=inherit-credentials but no readable host credentials at $HOST_CREDS" >&2
-    echo "       Log in on the host first, or set auth.mode to interactive, or export ANTHROPIC_API_KEY." >&2
-    exit 1
-  fi
-  if [[ "$AUTH_EFFECTIVE" == api-key-env && -z "${ANTHROPIC_API_KEY:-}" ]]; then
-    echo "Error: auth.mode=api-key-env but ANTHROPIC_API_KEY is unset." >&2
-    echo "       Export ANTHROPIC_API_KEY, or set auth.mode to interactive or auto." >&2
-    exit 1
-  fi
-  if [[ "$AUTH_EFFECTIVE" == interactive && "$MODE" != profile ]]; then
-    echo "Note: logging in inside a $MODE run won't persist; use profile.mode=profile for a lasting login." >&2
+    # Load the workspace .env/.envrc, then run the agent headless on the prompt.
+    local envload='cd "$WORKSPACE" 2>/dev/null || true; if command -v direnv >/dev/null 2>&1 && [ -f .envrc ]; then direnv allow . >/dev/null 2>&1 || true; eval "$(direnv export bash 2>/dev/null)" || true; fi; if [ -f .env ]; then set -a; . ./.env; set +a; fi'
+    COMMAND=(bash -lc "$envload; $(agent_headless_cmd "$OS_AGENT" /home/developer/.agentdev-prompt)")
   fi
 
   RUN_ID="$(new_run_id)"
-  compute_enc "$DIR_NAME"
 
-  # Resolve the profile path and decide whether to seed. Disk-mutating steps are
-  # guarded so --dry-run is side-effect-free.
-  local do_seed=no; cleanup=no
+  # Single-instance guard for a shared agent home.
   local NAME_LABEL=()
-  case "$MODE" in
-    clean)
-      PROFILE="$CLEAN_ROOT/$RUN_ID"; do_seed=yes
-      [[ "$KEEP" == yes ]] || cleanup=yes ;;
-    remember)
-      PROFILE="$CLEAN_ROOT/$RUN_ID"; do_seed=yes; cleanup=yes
-      MEMORY_STORE="$MEMORY_ROOT/$MEMORY_NAME"
-      [[ "$DRY_RUN" == yes ]] || resolve_memory_store "$MEMORY_NAME" ;;
-    profile)
-      PROFILE="$PROFILES_ROOT/$PROFILE_NAME"
-      # Serialize launchers (flock), then refuse if a live container already
-      # mounts this folder (catches an orphaned run whose launcher was killed).
-      if [[ "$DRY_RUN" != yes ]]; then
-        lock_profile "$PROFILE"
-        assert_profile_free "$PROFILE"
-      fi
-      # A fixed container name per folder makes the runtime itself reject a second
-      # concurrent run; the label lets you find and reap an orphan by hand
-      # (podman ps --filter label=agentdev.profile; podman rm -f <id>).
-      NAME_LABEL=(--name "$(profile_container_name "$PROFILE")" --label "agentdev.profile=$PROFILE")
-      [[ -f "$PROFILE/agentdev.meta.json" ]] || do_seed=yes ;;
-    *) echo "Error: unknown mode '$MODE'" >&2; exit 1 ;;
-  esac
-
-  if [[ "$DRY_RUN" != yes ]]; then
-    if [[ "$do_seed" == yes ]]; then
-      seed_profile; write_meta
-    fi
-    # Ensure the memory mount point exists in the profile for remember mode.
-    [[ "$MODE" == remember ]] && mkdir -p "$PROFILE/.claude/projects/$ENC/memory"
-    # Inherit the host's subscription login into the profile (once) so "it just works."
-    if [[ "$AUTH_EFFECTIVE" == inherit-credentials && ! -f "$PROFILE/.claude/.credentials.json" ]]; then
-      inherit_host_credentials "$HOST_CREDS" || exit 1
-      inherit_host_account "$HOME/.claude.json" "$PROFILE/.claude.json"
-      echo "Auth: copied host subscription credentials + account into profile (token kept private, excluded by .gitignore)." >&2
+  if [[ -n "$MNT_AGENT_FOLDER" ]]; then
+    NAME_LABEL=(--name "agentdev-$(printf '%s' "$MNT_AGENT_FOLDER" | sha256sum | cut -c1-12)" --label "agentdev.home=$MNT_AGENT_FOLDER")
+    if [[ "$DRY_RUN" != yes ]]; then
+      lock_home "$MNT_AGENT_FOLDER"
+      assert_home_free "$MNT_AGENT_FOLDER"
     fi
   fi
 
-  # Collect the configured mounts, then the host CA passthrough.
-  collect_mounts "agentdev" "$DIR_NAME"
-  # The workspace is itself a read-write mount unless made read-only; confirm it too.
-  if [[ "$WS_MOUNT_MODE" == rw && "$CONFIRM_RW" == true ]]; then
-    confirm_rw_mount "$WS_SOURCE" "/$DIR_NAME" || { echo "Error: workspace read-write declined; set mounts.workspace to ro." >&2; exit 1; }
-  fi
-  CA_CERT_MOUNT=(); CA_CERT_ENV=()
-  [[ "$SANDBOX_HOST_CA" == true ]] && collect_host_ca_mount
-
-  # The profile mount - the whole point: the agent's home is this folder, not yours.
-  local PROFILE_MOUNT=(
-    "-v" "$PROFILE/.claude:/home/developer/.claude:rw"
-    "-v" "$PROFILE/.claude.json:/home/developer/.claude.json:rw"
-  )
-  if [[ "$MODE" == remember ]]; then
-    local mem_target="/home/developer/.claude/projects/$ENC/memory"
-    register_target "$mem_target" "memory store $MEMORY_STORE"
-    PROFILE_MOUNT+=("-v" "$MEMORY_STORE:$mem_target:rw")
-  fi
-
-  if [[ "$DRY_RUN" != yes ]]; then
-    # Reproducibility pin now that the mount set is known.
-    write_lock
-  fi
-
-  # Host passthroughs (SSH keys/agent, api key, userns, USB).
-  local SSH_MOUNT=() SSH_AGENT=() API_ENV=() USERNS=() USB=()
-  [[ "$SANDBOX_SSH" == true && -d "$HOME/.ssh" ]] && SSH_MOUNT=("-v" "$HOME/.ssh:/home/developer/.ssh:ro")
-  if [[ "$SANDBOX_SSH" == true && -n "${SSH_AUTH_SOCK:-}" && -S "${SSH_AUTH_SOCK:-}" ]]; then
-    SSH_AGENT=("-v" "$SSH_AUTH_SOCK:/ssh-agent" "-e" "SSH_AUTH_SOCK=/ssh-agent")
-  fi
-  # "-e NAME" copies the host value, so the key never appears in argv or --dry-run.
-  [[ "$AUTH_EFFECTIVE" == api-key-env ]] && API_ENV=("-e" "ANTHROPIC_API_KEY")
-  [[ "$(uname -s)" == "Linux" ]] && USERNS=("--userns=keep-id")
-  [[ "$SANDBOX_USB" == true && -d /dev/bus/usb ]] && USB=("--device" "/dev/bus/usb")
+  # Build the mount plan.
+  collect_mounts "$DIR_NAME"
+  collect_ssh_mount
 
   MOUNTS_TMPFILE="$(mktemp)"
   printf "%b" "$MOUNTS_CONTENT" > "$MOUNTS_TMPFILE"
 
-  # Interactive only when attached to a terminal; keeps `-- command` automation clean.
-  local TTY=(-i); [[ -t 0 && -t 1 ]] && TTY=(-i -t)
+  # Model selection (one-shot only; otherwise the model is chosen inside the shell).
+  local MODEL_ARGS=()
+  if [[ "$RUN_MODE" == one-shot && -n "$OS_MODEL" ]]; then
+    local mv; mv=$(agent_model_env "$OS_AGENT")
+    [[ -n "$mv" ]] && MODEL_ARGS=(-e "$mv=$OS_MODEL")
+  fi
 
-  # Clean up on any exit (normal, error, signal). Established BEFORE the network is
-  # brought up so a failure after the proxy starts still tears it down. The vars it
-  # reads are global on purpose (correct even after launch() returns) and set -u-safe.
+  # Host passthroughs.
+  local USERNS=() USB=()
+  [[ "$(uname -s)" == "Linux" ]] && USERNS=("--userns=keep-id")
+  [[ "$WS_USB" == true && -d /dev/bus/usb ]] && USB=("--device" "/dev/bus/usb")
+
+  local TTY=()
+  if [[ "$RUN_MODE" == interactive ]]; then
+    TTY=(-i); [[ -t 0 && -t 1 ]] && TTY=(-i -t)
+  fi
+
+  # Clean up on any exit (tear down the network, drop the temp file).
   cleanup_run() {
     teardown_network
     rm -f "${MOUNTS_TMPFILE:-}"
-    if [[ "${cleanup:-}" == yes ]]; then
-      [[ -n "${PROFILE:-}" ]] && rm -rf "$PROFILE"
-    elif [[ -n "${PROFILE:-}" && "${KEEP:-}" == yes ]]; then
-      echo "Kept profile: $PROFILE" >&2
-    fi
   }
   trap cleanup_run EXIT
 
-  # Egress isolation (off | none | allowlist). The model endpoint must be allowed
-  # before anything is started. Populates NET_ARGS; starts the proxy sidecar only on
-  # a real allowlist launch (a dry run just describes it).
-  if [[ "$NET_MODE" == allowlist && ${#NET_ALLOW[@]} -eq 0 ]]; then
-    echo "Error: network.mode=allowlist but network.allow is empty." >&2
-    echo "       Add hosts to network.allow, or set network.mode to none for no egress." >&2
-    exit 1
-  fi
-  assert_model_endpoint_allowed
+  # Egress isolation (off | none | allowlist).
   setup_network
 
   local PODMAN_ARGS=(
@@ -339,19 +203,18 @@ launch() {
     "${NAME_LABEL[@]}"
     "${NET_ARGS[@]}"
     "${USERNS[@]}" "${USB[@]}" "${DEVICE_MOUNTS[@]}"
-    -v "$WS_SOURCE:/$DIR_NAME:$WS_MOUNT_MODE"
-    "${PROFILE_MOUNT[@]}"
+    "${WORKSPACE_MOUNT[@]}"
+    "${HOME_MOUNTS[@]}"
     "${SSH_MOUNT[@]}" "${SSH_AGENT[@]}"
-    "${CA_CERT_MOUNT[@]}"
     "${VOLUME_MOUNTS[@]}"
     "${PROMPT_MOUNT[@]}"
-    "${API_ENV[@]}" "${MODEL_ARGS[@]}" "${CA_CERT_ENV[@]}"
+    "${MODEL_ARGS[@]}"
     -v "$MOUNTS_TMPFILE:/home/developer/mounts:ro"
     -e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)"
     -e "HOST_HOME=$HOME" -e "HOST_USER=$(id -un)"
     -e "WORKSPACE=/$DIR_NAME"
-    -e "AGENTDEV_WORKDIR=$CONTAINER_WORKDIR"
-    -w "$CONTAINER_WORKDIR"
+    -e "AGENTDEV_WORKDIR=/$DIR_NAME"
+    -w "/$DIR_NAME"
     "$IMAGE"
   )
   if [[ ${#COMMAND[@]} -gt 0 ]]; then PODMAN_ARGS+=("${COMMAND[@]}"); else PODMAN_ARGS+=(bash); fi
@@ -359,54 +222,48 @@ launch() {
   if [[ "$DRY_RUN" == yes ]]; then
     echo "# agentdev --dry-run"
     echo "config:        $JSON_CONFIG"
-    echo "agent:         $AGENT_NAME"
-    echo "model:         ${MODEL_ID:-(agent default)}   provider: $MODEL_PROVIDER"
-    echo "endpoint:      $MODEL_ENDPOINT_HOST:$MODEL_ENDPOINT_PORT"
-    [[ ${#MODEL_PASS_ENV[@]} -gt 0 ]] && echo "pass env:      ${MODEL_PASS_ENV[*]}"
-    echo "mode:          $MODE"
-    echo "profile:       $PROFILE"
-    echo "template:      $TEMPLATE_SOURCE"
-    echo "workspace:     $WS_SOURCE -> /$DIR_NAME ($WS_MOUNT_MODE)   (enc: $ENC)"
-    echo "entry folder:  $CONTAINER_WORKDIR"
-    [[ -n "$PROMPT_FILE" ]] && echo "prompt file:   $PROMPT_FILE -> /home/developer/.agentdev-prompt (ro); headless, skip-permissions"
-    echo "trust:         $WS_TRUST    auth: $AUTH_MODE -> $AUTH_EFFECTIVE"
+    echo "run mode:      $RUN_MODE"
+    echo "workspace:     $WS_SOURCE -> /$DIR_NAME ($WS_MODE)   (enc: $ENC)"
+    echo "image:         $IMAGE"
+    if [[ "$RUN_MODE" == one-shot ]]; then
+      echo "agent:         $OS_AGENT   model: ${OS_MODEL:-(agent default)}"
+      echo "prompt file:   $PROMPT_FILE -> /home/developer/.agentdev-prompt (ro); headless"
+    else
+      echo "agent:         (interactive; run claude/omp/pi inside the shell)"
+    fi
+    echo "agent home:    ${MNT_AGENT_FOLDER:-(ephemeral; discarded on exit)}"
+    [[ -n "$MNT_HISTORY" ]] && echo "history:       $MNT_HISTORY"
+    [[ -n "$MNT_MEMORY" ]]  && echo "memory:        $MNT_MEMORY"
+    echo "credentials:   from .env/.envrc in the workspace"
     if [[ "$NET_MODE" == allowlist ]]; then
       echo "network:       allowlist (${#NET_ALLOW[@]} rule(s), log=$NET_LOG, mitm=$NET_MITM) via proxy sidecar"
       printf '  allow:       %s\n' "${NET_ALLOW[@]}"
     else
       echo "network:       $NET_MODE"
     fi
-    echo "sandbox:       confirm_rw=$CONFIRM_RW  ssh=$SANDBOX_SSH  usb=$SANDBOX_USB  host_ca=$SANDBOX_HOST_CA"
-    [[ "$MODE" == remember ]] && echo "memory store:  $MEMORY_STORE"
-    echo "cleanup:       $cleanup"
+    echo "workspace:     ssh=$WS_SSH  usb=$WS_USB"
     echo
     echo "# podman command:"
     printf 'podman'; printf ' %q' "${PODMAN_ARGS[@]}"; echo
     rm -f "$MOUNTS_TMPFILE"
-    trap - EXIT                 # dry run is side-effect-free; skip teardown
+    trap - EXIT
     return 0
   fi
 
-  # Close the profile lock fd in the podman child so it is not inherited by the
-  # container runtime (conmon, fuse-overlayfs). Those daemonize and outlive this
-  # launcher; if they kept the fd, flock would stay held and pin the profile lock
-  # to an orphaned container instead of to this launcher's lifetime.
-  if [[ -n "${PROFILE_LOCK_FD:-}" ]]; then
-    podman "${PODMAN_ARGS[@]}" {PROFILE_LOCK_FD}>&-
+  # Close the home-lock fd in the podman child so a detached container cannot pin it.
+  if [[ -n "${HOME_LOCK_FD:-}" ]]; then
+    podman "${PODMAN_ARGS[@]}" {HOME_LOCK_FD}>&-
   else
     podman "${PODMAN_ARGS[@]}"
   fi
 }
 
-# extract_config_flag - pull -c/--config out of the arg stream (from any position)
-# so it applies uniformly to every command and subcommand. Sets the JSON_CONFIG /
-# JSON_CONFIG_EXPLICIT globals that config.sh reads, and returns the remaining args
-# via the CLEAN_ARGS global.
+# extract_config_flag - pull -c/--config out of the arg stream from any position.
 extract_config_flag() {
   CLEAN_ARGS=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --)          CLEAN_ARGS+=("$@"); break ;;   # stop at the command passthrough
+      --)          CLEAN_ARGS+=("$@"); break ;;
       -c|--config) JSON_CONFIG="$(expand_tilde "${2:?-c/--config needs a path}")"; JSON_CONFIG_EXPLICIT=yes; shift ;;
       --config=*)  JSON_CONFIG="$(expand_tilde "${1#--config=}")"; JSON_CONFIG_EXPLICIT=yes ;;
       -c=*)        JSON_CONFIG="$(expand_tilde "${1#-c=}")"; JSON_CONFIG_EXPLICIT=yes ;;
@@ -416,9 +273,6 @@ extract_config_flag() {
   done
 }
 
-# main - resolve the config path (-c > $AGENTDEV_CONFIG > ./agentdev-config.json),
-# then launch. There are no subcommands: the launcher's only job is to read the
-# config and run the container (with --dry-run to preview and --prompt for a one-shot).
 main() {
   if [[ -n "${AGENTDEV_CONFIG:-}" ]]; then
     JSON_CONFIG="$(expand_tilde "$AGENTDEV_CONFIG")"; JSON_CONFIG_EXPLICIT=yes

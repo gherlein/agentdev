@@ -298,53 +298,48 @@ committed `CLAUDE.md`; your personal, machine-specific preferences belong in
 
 ## Part 3 — How this maps to agentdev
 
-agentdev's whole premise is that **the agent's home is one profile folder** —
-mounted as `/home/developer/.claude` and `/home/developer/.claude.json`, never the
-host's real `~/.claude`. That means every context/memory lever above lives
-*inside a profile*, and agentdev's modes decide how much of it persists.
+agentdev's premise is that **the agent's home is host folders you mount** — bound as
+`/home/developer/.claude` and `/home/developer/.claude.json`, never the host's real
+`~/.claude`. Every context/memory lever above lives inside that mounted home, and the
+`mounts` keys decide how much of it persists.
 
-### 3.1 Where each layer lives in a profile
+### 3.1 Where each layer lives in the mounted home
 
-| Layer | In the profile | Notes |
+| Layer | In the home | Notes |
 |---|---|---|
-| Authored `CLAUDE.md` | `<profile>/.claude/CLAUDE.md` | Seeded from `templates/default`; drifts per run in `--profile` mode |
-| Auto memory | `<profile>/.claude/projects/<ENC>/memory/` | The same `MEMORY.md` + detail-file layout as §2.2 |
-| MCP config | `<profile>/.claude.json` | `local`-scope servers are per-project inside the profile's home |
-| Skills / plugins | `<profile>/.claude/…` | Resident cost applies inside the container just as on the host |
+| Authored `CLAUDE.md` | `<agent_folder>/.claude/CLAUDE.md` | You provide it (copy from `templates/claude/`, mount it, or write it into a kept home) |
+| Auto memory | `<agent_folder>/.claude/projects/<ENC>/memory/` | The same `MEMORY.md` + detail-file layout as §2.2 |
+| MCP config | `<agent_folder>/.claude.json` | `local`-scope servers are per-project inside the home |
+| Skills / plugins | `<agent_folder>/.claude/…` | Resident cost applies inside the container just as on the host |
 
-`<ENC>` is agentdev's deterministic encoding of the workspace basename (`"-" +
-name` with `.` → `-`), matching Claude Code's own `projects/<dir>` naming so auto
-memory lands where the CLI expects it.
+`<ENC>` is agentdev's deterministic encoding of the workspace mount name (`"-" + name`
+with `.` → `-`), matching Claude Code's own `projects/<dir>` naming so auto memory lands
+where the CLI expects it.
 
-### 3.2 Modes decide what memory survives
+### 3.2 What persists is a function of what you mount
 
-| Mode | Config | Auto memory / history | Context implication |
-|---|---|---|---|
-| **clean** (default) | seeded fresh, discarded | none — throwaway home | Zero inherited memory; cheapest, most reproducible |
-| **remember** | fresh home, discarded | **persistent memory store** mounted at `.claude/projects/<ENC>/memory` | Keeps learned memory across runs while history stays clean |
-| **profile** (`profile.mode: "profile"`, `profile.name`) | seeded once, then drifts | persistent (kept in the folder) | A durable identity; its `CLAUDE.md`/memory/MCP accumulate over time |
+| You mount | Auto memory / history | Context implication |
+|---|---|---|
+| **nothing** (no `agent_folder`) | none — throwaway home discarded on exit | Zero inherited memory; cheapest, most reproducible (the clean room) |
+| **only `mounts.memory`** (fresh home otherwise) | **persistent memory** at `.claude/projects/<ENC>/memory`; history stays fresh | Keeps learned memory across runs while transcripts start clean |
+| **`mounts.agent_folder`** (a kept folder) | persistent — config, history, and memory all live in the folder | A durable identity that accumulates over time |
 
-The important connection: in **remember** mode, the folder agentdev mounts *is*
-the auto-memory directory from §2.2. So the agentdev memory store and Claude Code's
-own auto memory are the same mechanism — agentdev just makes the store a named,
-swappable, host-side folder (under `profile.memory_root`) you can keep, fork, or
-discard independently of the throwaway home.
+The important connection: `mounts.memory` points at the auto-memory directory from §2.2.
+So the agentdev memory folder and Claude Code's own auto memory are the same mechanism —
+agentdev just makes it a named, swappable, host-side folder you keep, fork, or discard
+independently of the (otherwise ephemeral) home.
 
-### 3.3 Practical guidance for agentdev profiles
+### 3.3 Practical guidance
 
-- **Seed a lean `CLAUDE.md` in the template.** Since every profile inherits it and
-  it loads every session, keep `templates/default/.claude/CLAUDE.md` to facts, not
-  procedures.
-- **Prefer `remember` to `profile` when you want learned memory but clean
-  history.** You get persistence where it matters (memory) without dragging a
-  growing transcript/history along, which keeps each run's context lean.
-- **Control MCP cost at the profile boundary.** Because `.claude.json` lives in
-  the profile, a heavy server registered there is resident for every run of that
-  profile — the same "don't make it `user`-scope" lever from §1.5, applied to the
-  profile.
-- **Measure inside the container.** The host's `/context` reasoning applies
-  identically to the agent running in the profile; check it there when a profile
-  feels heavy.
+- **Keep a lean `CLAUDE.md` in your starter kit.** It loads every session, so keep
+  `templates/claude/CLAUDE.md` to facts, not procedures.
+- **Mount only `mounts.memory` when you want learned memory but clean history.** You get
+  persistence where it matters without dragging a growing transcript along.
+- **Control MCP cost at the home boundary.** Because `.claude.json` lives in the home, a
+  heavy server registered there is resident for every run — the same "don't make it
+  `user`-scope" lever from §1.5.
+- **Measure inside the container.** The host's `/context` reasoning applies identically to
+  the agent running in the mounted home; check it there when a run feels heavy.
 
 ---
 

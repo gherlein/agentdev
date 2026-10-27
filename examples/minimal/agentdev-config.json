@@ -1,35 +1,4 @@
 {
-  "agent": {
-    "name": "claude",
-    "image": "ghcr.io/gherlein/agentdev:latest"
-  },
-  "model": {
-    "provider": "anthropic"
-  },
-  "profile": {
-    "mode": "clean"
-  },
-  "auth": {
-    "mode": "auto"
-  },
-  "workspace": {
-    "source": ".",
-    "trust": "skip-permissions",
-    "workdir": "."
-  },
-  "network": {
-    "mode": "off"
-  },
-  "mounts": {
-    "workspace": "rw",
-    "read_only": {
-    },
-    "read_write": {
-    }
-  },
-  "sandbox": {
-    "ssh": true,
-    "usb": true,
-    "host_ca": true
-  }
+  "image": "ghcr.io/gherlein/agentdev:latest",
+  "workspace": { "source": ".", "mount": "work" }
 }

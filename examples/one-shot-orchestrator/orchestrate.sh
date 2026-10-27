@@ -21,7 +21,6 @@ AGENTDEV="${AGENTDEV:-agentdev}"                    # override to a shim for sel
 # $WORKSPACE before exec, so a relative path would stop resolving there.
 [[ "$AGENTDEV" == */* ]] && AGENTDEV=$(realpath "$AGENTDEV")
 MAXJOBS="${MAXJOBS:-4}"                             # max concurrent containers
-AUTH="${AGENTDEV_AUTH:-api-key-env}"                # headless needs a key, not login
 CHANNEL_ROOT="${CHANNEL_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/agentctl.XXXXXX")}"
 WORKSPACE="${WORKSPACE:-$(mktemp -d "${TMPDIR:-/tmp}/agentws.XXXXXX")}"
 SELF_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -52,17 +51,16 @@ launch_one() {           # launch_one <n> <task> ; sets LAST_PID
   mkdir -p "$dir/in" "$dir/out" "$dir/bin"
   cp "$SELF_DIR/worker.sh" "$dir/bin/worker.sh"
   printf '%s' "$task" > "$dir/in/task.txt"
-  # Generate this worker's config: a clean container, api-key auth, the shared
-  # workspace, and the channel dir bind-mounted read-write at /external/<run>.
+  # Generate this worker's config: an ephemeral container (no agent_folder), the
+  # shared workspace, and the channel dir bind-mounted read-write at /external/<run>.
+  # Credentials come from a .env/.envrc in the workspace.
   cfg="$dir/agentdev-config.json"
-  python3 - "$cfg" "$WORKSPACE" "$dir" "/external/$run" "$AUTH" <<'PY'
+  python3 - "$cfg" "$WORKSPACE" "$dir" "/external/$run" <<'PY'
 import json, sys
-cfg, ws, chan, dest, auth = sys.argv[1:6]
+cfg, ws, chan, dest = sys.argv[1:5]
 json.dump({
-    "profile":   {"mode": "clean"},
-    "auth":      {"mode": auth},
-    "workspace": {"source": ws},
-    "mounts":    {"read_write": {chan: dest}},
+    "workspace": {"source": ws, "mount": "ws"},
+    "mounts":    {"read_write": [{"src": chan, "dest": dest}]},
 }, open(cfg, "w"))
 PY
   (

@@ -1,31 +1,21 @@
 #!/bin/bash
-# mounts.sh - agentdev's own external-mount collection (no localdev dependency).
+# mounts.sh - build the podman mount plan from the config. Everything the container
+# sees that is not in the base image comes from here: the workspace, files injected
+# into it (workspace.files), the agent's home (mounts.agent_folder) with optional
+# history/memory redirects, extra read-only/read-write folders, and tty devices.
+# Container-side target collisions are fatal.
 #
-# Mounts come only from the config file: mounts.read_only / mounts.read_write maps
-# and the mounts.devices list. A source that does not exist, is not a directory, or
-# is unreadable aborts the launch (fail-closed); so does a missing device.
-#
-# Populates:
-#   VOLUME_MOUNTS   array of "-v host:container:mode"
-#   DEVICE_MOUNTS   array of "--device path"
-#   MOUNTS_CONTENT  the in-container ~/mounts map (printf %b string)
-#
-# collect_host_ca_mount() is a separate entry point for host TLS anchors; it sets
-# CA_CERT_MOUNT and CA_CERT_ENV and must run after collect_mounts().
-#
-# Every mount claims exactly one container-side target; a second claim is fatal.
-# Requires $LIBDIR (for jsoncfg.py), python3, and the config globals.
+# Populates: WORKSPACE_MOUNT, VOLUME_MOUNTS, HOME_MOUNTS, DEVICE_MOUNTS (arrays) and
+# MOUNTS_CONTENT (the in-container ~/mounts map). collect_ssh_mount sets SSH_MOUNT /
+# SSH_AGENT. Requires $LIBDIR, python3, the config globals, agents.sh, and (for the
+# home layout + redirects) OS_AGENT and ENC from the launcher. mkdir side effects are
+# skipped when DRY_RUN=yes.
 
-# Container paths agentdev manages itself; a user mount may target none of these.
 RESERVED_TARGETS=(
-  /home/developer/.claude
-  /home/developer/.claude.json
   /home/developer/.ssh
-  /home/developer/.npm
   /home/developer/mounts
   /home/developer/.agentdev-prompt
   /ssh-agent
-  /usr/local/share/ca-certificates
 )
 
 declare -A USED_TARGETS
@@ -41,140 +31,130 @@ register_target() {
   USED_TARGETS["$target"]="$desc"
 }
 
-# resolve_dir PATH DESC - print the normalized absolute path of an existing,
-# readable directory, or abort naming DESC.
+# resolve_dir PATH DESC -> normalized path of an existing, readable directory, else abort.
 resolve_dir() {
-  local path="$1" desc="$2" resolved
-  if ! resolved=$(realpath -e "$path" 2>/dev/null) || [[ ! -d "$resolved" ]]; then
-    echo "Error: $desc: not an existing directory: $path" >&2
-    exit 1
+  local path="$1" desc="$2" r
+  if ! r=$(realpath -e "$path" 2>/dev/null) || [[ ! -d "$r" ]]; then
+    echo "Error: $desc: not an existing directory: $path" >&2; exit 1
   fi
-  if [[ ! -r "$resolved" ]]; then
-    echo "Error: $desc: not readable: $resolved" >&2
-    exit 1
-  fi
-  printf '%s\n' "$resolved"
+  [[ -r "$r" ]] || { echo "Error: $desc: not readable: $r" >&2; exit 1; }
+  printf '%s\n' "$r"
 }
 
-add_device_mount() {
-  local path="$1"
-  if [[ ! -c "$path" && ! -b "$path" ]]; then
-    echo "Error: mounts.devices: not a character or block device: $path" >&2
-    exit 1
+# resolve_file PATH DESC -> normalized path of an existing, readable file, else abort.
+resolve_file() {
+  local path="$1" desc="$2" r
+  if ! r=$(realpath -e "$path" 2>/dev/null) || [[ ! -f "$r" ]]; then
+    echo "Error: $desc: not an existing file: $path" >&2; exit 1
   fi
-  DEVICE_MOUNTS+=("--device" "$path")
-  echo "Device passthrough:    $path" >&2
+  [[ -r "$r" ]] || { echo "Error: $desc: not readable: $r" >&2; exit 1; }
+  printf '%s\n' "$r"
 }
 
-# _mount SRC TARGET MODE DESC - low-level add with the collision check.
-_mount() {
+_add() {   # SRC TARGET MODE DESC -> append a -v with the collision check
   local src="$1" target="$2" mode="$3" desc="$4"
   register_target "$target" "$desc"
   VOLUME_MOUNTS+=("-v" "${src}:${target}:${mode}")
-  local label="read-only"; [[ "$mode" == "rw" ]] && label="read-write"
+  local label="read-only"; [[ "$mode" == rw ]] && label="read-write"
   printf 'Mounting (%s): %s -> %s\n' "$label" "$src" "$target" >&2
   MOUNTS_CONTENT+="$src -> ${target} (${label})\n"
 }
 
-# confirm_rw_mount HOST TARGET - gate a read-write mount. Prints nothing and
-# returns 0 (allow) unless CONFIRM_RW=true. When confirming: a HOST matching an
-# entry in RW_ALLOW (resolved) is auto-approved; otherwise prompt on /dev/tty; a
-# run with no controlling terminal denies (fail-closed) so unattended/eval runs
-# cannot silently gain write access. Returns 1 to deny.
-confirm_rw_mount() {
-  [[ "${CONFIRM_RW:-false}" == true ]] || return 0
-  [[ "${DRY_RUN:-no}" == yes ]] && return 0   # --dry-run must not prompt
-  local host="$1" target="$2" entry resolved_host resolved_entry ans
-  resolved_host=$(realpath "$host" 2>/dev/null || printf '%s' "$host")
-  for entry in "${RW_ALLOW[@]:-}"; do
-    [[ -z "$entry" ]] && continue
-    resolved_entry=$(realpath "$(expand_tilde "$entry")" 2>/dev/null || printf '%s' "$entry")
-    if [[ "$resolved_entry" == "$resolved_host" ]]; then
-      echo "rw mount pre-approved (mounts.rw_allow): $resolved_host -> $target" >&2
-      return 0
-    fi
-  done
-  # Probe by actually opening /dev/tty: the device node can exist while open()
-  # fails with ENXIO when there is no controlling terminal (CI, nohup, a harness).
-  if { exec 3<>/dev/tty; } 2>/dev/null; then
-    printf 'Allow READ-WRITE mount  %s -> %s ? [y/N] ' "$resolved_host" "$target" >&3
-    read -r ans <&3 || ans=""
-    exec 3>&-
-    case "$ans" in
-      [yY]|[yY][eE][sS]) return 0 ;;
-      *) echo "rw mount denied: $resolved_host -> $target" >&2; return 1 ;;
-    esac
-  fi
-  echo "Refusing read-write mount (no terminal to confirm; fail-closed): $resolved_host -> $target" >&2
-  echo "       pre-approve it in mounts.rw_allow, or mount it read-only." >&2
-  return 1
-}
-
-# _resolve_dest WORKSPACE SRC DEST -> absolute container path.
-_resolve_dest() {
-  local workspace="$1" src="$2" dest="$3"
-  case "$dest" in
-    "&") printf '/%s\n' "$(basename "$src")" ;;
-    /*)  printf '%s\n' "$dest" ;;
-    *)   printf '%s/%s\n' "$workspace" "$dest" ;;
-  esac
-}
-
-# _mounts_from_config WORKSPACE - apply the config's mounts.read_only /
-# mounts.read_write maps. Each entry is "src": "dest", where src is anchored at the
-# config file's directory and dest is an absolute container path, a path relative
-# to the workspace, or "&" to mirror src's basename at the container root.
-_mounts_from_config() {
-  local workspace="$1"
-  [[ "$CONFIG_PRESENT" == yes ]] || return 0
-  local key mode src dest rsrc target entries
-  for key in read_only read_write; do
-    mode=ro; [[ "$key" == read_write ]] && mode=rw
-    entries=$(python3 "$LIBDIR/jsoncfg.py" table "$JSON_CONFIG" "mounts.$key" 2>/dev/null || true)
-    while IFS=$'\t' read -r src dest; do
-      [[ -n "$src" ]] || continue
-      rsrc=$(resolve_dir "$(anchor_path "$src")" "mounts.$key \"$src\"")
-      target=$(_resolve_dest "$workspace" "$rsrc" "$dest")
-      if [[ "$mode" == rw ]] && ! confirm_rw_mount "$rsrc" "$target"; then
-        continue
-      fi
-      _mount "$rsrc" "$target" "$mode" "mounts.$key $src"
-    done <<< "$entries"
-  done
-}
-
+# collect_mounts DIR_NAME - DIR_NAME is the resolved workspace mount name.
 collect_mounts() {
-  local toolname="$1" dirname="$2"
-  VOLUME_MOUNTS=(); DEVICE_MOUNTS=()
-  MOUNTS_CONTENT="# ${toolname} mount map\n# HOST PATH -> CONTAINER PATH (mode)\n"
+  local dir="$1"
+  WORKSPACE_MOUNT=(); VOLUME_MOUNTS=(); DEVICE_MOUNTS=(); HOME_MOUNTS=()
+  MOUNTS_CONTENT="# agentdev mount map\n# HOST PATH -> CONTAINER PATH (mode)\n"
   USED_TARGETS=()
 
-  register_target "/${dirname}" "workspace"
-  local r
-  for r in "${RESERVED_TARGETS[@]}"; do USED_TARGETS["$r"]="reserved (managed mount)"; done
+  register_target "/$dir" "workspace"
+  local r; for r in "${RESERVED_TARGETS[@]}"; do USED_TARGETS["$r"]="reserved"; done
 
-  _mounts_from_config "/${dirname}"
-  local device
-  for device in "${DEVICES[@]:-}"; do
-    [[ -n "$device" ]] && add_device_mount "$device"
+  WORKSPACE_MOUNT=("-v" "$WS_SOURCE:/$dir:$WS_MODE")
+  MOUNTS_CONTENT+="$WS_SOURCE -> /$dir ($WS_MODE)\n"
+
+  _mount_files "$dir"
+  _mount_home
+  _mount_folders read_only ro
+  _mount_folders read_write rw
+
+  local d
+  for d in "${TTY_DEVICES[@]:-}"; do
+    [[ -n "$d" ]] || continue
+    [[ -c "$d" || -b "$d" ]] || { echo "Error: mounts.tty_devices: not a device: $d" >&2; exit 1; }
+    DEVICE_MOUNTS+=("--device" "$d")
+    echo "Device passthrough:    $d" >&2
   done
   return 0
 }
 
-# collect_host_ca_mount - pass the host's extra TLS trust anchors read-only so
-# cert verification inside the container matches the host.
-collect_host_ca_mount() {
-  CA_CERT_MOUNT=(); CA_CERT_ENV=()
-  local anchors=""
-  if [[ -d /usr/local/share/ca-certificates ]]; then anchors=/usr/local/share/ca-certificates
-  elif [[ -d /etc/pki/ca-trust/source/anchors ]]; then anchors=/etc/pki/ca-trust/source/anchors
+# _mount_files - workspace.files: host files bind-mounted read-only into the working dir.
+_mount_files() {
+  local dir="$1" src name rsrc
+  [[ "$CONFIG_PRESENT" == yes ]] || return 0
+  while IFS=$'\t' read -r src name; do
+    [[ -n "$src" && -n "$name" ]] || continue
+    rsrc=$(resolve_file "$(anchor_path "$src")" "workspace.files \"$src\"")
+    _add "$rsrc" "/$dir/$name" ro "workspace.files $src"
+  done < <(_json rows "$JSON_CONFIG" "workspace.files" source name 2>/dev/null || true)
+}
+
+# _mount_folders KEY MODE - mounts.read_only / mounts.read_write, { src, dest } pairs.
+_mount_folders() {
+  local key="$1" mode="$2" src dest rsrc
+  [[ "$CONFIG_PRESENT" == yes ]] || return 0
+  while IFS=$'\t' read -r src dest; do
+    [[ -n "$src" && -n "$dest" ]] || continue
+    [[ "$dest" == /* ]] || { echo "Error: mounts.$key: dest must be an absolute container path: $dest" >&2; exit 1; }
+    rsrc=$(resolve_dir "$(anchor_path "$src")" "mounts.$key \"$src\"")
+    _add "$rsrc" "$dest" "$mode" "mounts.$key $src"
+  done < <(_json rows "$JSON_CONFIG" "mounts.$key" src dest 2>/dev/null || true)
+}
+
+# _mount_home - mount the agent's home dir(s) from agent_folder (pre-creating an
+# empty, host-owned home when the folder is new), then overlay the optional history
+# and memory redirects at the agent-specific path agentdev knows.
+_mount_home() {
+  local item kind host cont
+  if [[ -n "$MNT_AGENT_FOLDER" ]]; then
+    [[ "$DRY_RUN" == yes ]] || mkdir -p "$MNT_AGENT_FOLDER"
+    while IFS=$'\t' read -r item kind; do
+      [[ -n "$item" ]] || continue
+      host="$MNT_AGENT_FOLDER/$item"; cont="$AGENT_HOME/$item"
+      if [[ "$DRY_RUN" != yes ]]; then
+        if [[ "$kind" == dir ]]; then mkdir -p "$host"; else [[ -e "$host" ]] || : > "$host"; fi
+      fi
+      register_target "$cont" "agent home ($item)"
+      HOME_MOUNTS+=("-v" "$host:$cont:rw")
+      MOUNTS_CONTENT+="$host -> $cont (read-write)\n"
+    done < <(agent_home_items "$OS_AGENT")
   fi
-  [[ -z "$anchors" ]] && return 0
-  # Only bother if the host actually has extra anchors installed.
-  if [[ -n "$(find "$anchors" -maxdepth 1 -type f 2>/dev/null | head -1)" ]]; then
-    CA_CERT_MOUNT=("-v" "${anchors}:/usr/local/share/ca-certificates:ro")
-    CA_CERT_ENV=("-e" "REFRESH_CA_CERTS=1" "-e" "NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt")
-    echo "Mounting (read-only): ${anchors} -> /usr/local/share/ca-certificates" >&2
-    MOUNTS_CONTENT+="${anchors} -> /usr/local/share/ca-certificates (read-only)\n"
+
+  local hist mem
+  if [[ -n "$MNT_HISTORY" ]]; then
+    hist=$(agent_history_dest "$OS_AGENT" "$ENC")
+    [[ -n "$hist" ]] || { echo "Error: agent '$OS_AGENT' has no separable history folder; remove mounts.history." >&2; exit 1; }
+    [[ "$DRY_RUN" == yes ]] || mkdir -p "$MNT_HISTORY"
+    register_target "$hist" "mounts.history"
+    HOME_MOUNTS+=("-v" "$MNT_HISTORY:$hist:rw")
+    MOUNTS_CONTENT+="$MNT_HISTORY -> $hist (read-write)\n"
+  fi
+  if [[ -n "$MNT_MEMORY" ]]; then
+    mem=$(agent_memory_dest "$OS_AGENT" "$ENC")
+    [[ -n "$mem" ]] || { echo "Error: agent '$OS_AGENT' has no separable memory folder; remove mounts.memory." >&2; exit 1; }
+    [[ "$DRY_RUN" == yes ]] || mkdir -p "$MNT_MEMORY"
+    register_target "$mem" "mounts.memory"
+    HOME_MOUNTS+=("-v" "$MNT_MEMORY:$mem:rw")
+    MOUNTS_CONTENT+="$MNT_MEMORY -> $mem (read-write)\n"
+  fi
+}
+
+# collect_ssh_mount - workspace.ssh: mount host ~/.ssh read-only + forward the agent socket.
+collect_ssh_mount() {
+  SSH_MOUNT=(); SSH_AGENT=()
+  [[ "$WS_SSH" == true ]] || return 0
+  [[ -d "$HOME/.ssh" ]] && SSH_MOUNT=("-v" "$HOME/.ssh:/home/developer/.ssh:ro")
+  if [[ -n "${SSH_AUTH_SOCK:-}" && -S "${SSH_AUTH_SOCK:-}" ]]; then
+    SSH_AGENT=("-v" "$SSH_AUTH_SOCK:/ssh-agent" "-e" "SSH_AUTH_SOCK=/ssh-agent")
   fi
 }

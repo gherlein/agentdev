@@ -33,24 +33,25 @@ it with `--prompt`, which handles stdin and skip-permissions for you:
 
 ```bash
 cat > worker.json <<'EOF'
-{ "profile": {"mode": "clean"}, "auth": {"mode": "api-key-env"},
-  "workspace": {"source": "/path/to/repo"} }
+{ "workspace": { "source": "/path/to/repo", "mount": "repo" } }
 EOF
 echo "<the task>" > task.md
+# ANTHROPIC_API_KEY comes from a .env/.envrc in the workspace (the agent loads it)
 answer=$(agentdev -c worker.json --prompt task.md)
 ```
 
-Three things are mandatory for an **unattended** worker (each fails silently or
-hangs if omitted):
+Two things are mandatory for an **unattended** worker (each fails or hangs if omitted):
 
-- `auth.mode: "api-key-env"` with `ANTHROPIC_API_KEY` set — headless runs cannot do
-  an interactive login, and clean mode does not inherit a subscription. This also
-  keeps account-level claude.ai connectors from leaking into the worker.
-- Use `--prompt <file>` (or `prompt.file`) rather than a raw `-- claude -p "…"`: it
-  runs `claude --dangerously-skip-permissions` with stdin closed, so the worker
-  neither stalls on approvals nor hangs on a TTY. If you do use `-- claude` yourself,
-  you must add those yourself.
-- `workspace.source` is the repo the task is about (default: the config file's dir).
+- **Credentials in a `.env`/`.envrc` in the workspace** (e.g. `ANTHROPIC_API_KEY=…`) —
+  headless runs cannot do an interactive login, and agentdev passes no credentials
+  through the config. An API key also keeps account-level claude.ai connectors out of
+  the worker. If the key file must stay out of the repo, inject it with `workspace.files`.
+- Use `--prompt <file>` (or a `one-shot` block) rather than a raw `-- claude -p "…"`:
+  agentdev runs `claude --dangerously-skip-permissions` with stdin closed, so the worker
+  neither stalls on approvals nor hangs on a TTY.
+
+The worker is **ephemeral** — no `mounts.agent_folder`, so its home is discarded on exit.
+`workspace.source` is the repo the task is about (default: the config file's dir).
 
 agentdev prints its diagnostics to **stderr**, so stdout is clean — capturing
 `$(…)` gives you just the agent's answer.
@@ -59,7 +60,7 @@ agentdev prints its diagnostics to **stderr**, so stdout is clean — capturing
 
 - **Simple:** capture stdout, as above. Good for one text answer per task.
 - **Structured / multiple artifacts:** bind a per-run channel dir via the config's
-  `mounts.read_write` map (`{ "<host-dir>": "/external/<run>" }`); the worker writes its
+  `mounts.read_write` array (`[{ "src": "<host-dir>", "dest": "/external/<run>" }]`); the worker writes its
   result there with an **atomic rename** (temp → `mv`), and you read it after the
   worker exits. Completion needs no signal of its own: `agentdev` runs `podman
   run --rm` in the foreground, so the worker process exiting *is* "task done".
@@ -72,14 +73,14 @@ agentdev prints its diagnostics to **stderr**, so stdout is clean — capturing
   and collects `out/result.txt`. Run its `./selftest.sh` to see the flow with no
   image or tokens.
 - If issuing commands yourself: background each worker and `wait`, throttling to a
-  sane concurrency (e.g. 4). Each `profile.mode: "clean"` worker takes **no profile
-  lock**, so they run concurrently and safely.
-- **Never point multiple workers at one named profile** — the single-instance guard
-  refuses the second. For a shared identity/skills, fork the profile folder
-  (`cp -a base wN`) per worker, or provision each worker profile with
-  `sm sync --copy --agent-home <worker-profile>` (see
-  `docs/applying-sm-managed-skills.md`). Do provisioning **host-side, before
-  launch** — a worker cannot usefully provision itself from inside its sandbox.
+  sane concurrency (e.g. 4). Each **ephemeral** worker (no `mounts.agent_folder`) takes
+  no lock, so they run concurrently and safely.
+- **Never point multiple workers at one `mounts.agent_folder`** — the single-instance
+  guard refuses the second. For a shared identity/skills, `cp -a` the agent home per
+  worker, or provision each worker home with `sm sync --copy --agent-home
+  <worker-home>/.claude` (see `docs/applying-sm-managed-skills.md`). Do provisioning
+  **host-side, before launch** — a worker cannot usefully provision itself from inside
+  its sandbox.
 
 ## Do not nest — spawn siblings from the host
 

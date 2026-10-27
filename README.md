@@ -13,7 +13,7 @@ and did across runs, add its **memory** folder and its **project (transcript)** 
 agentdev never versions them or hides them behind management subcommands. We ship example
 configs for the common setups.
 
-> **Claude Code is the primary agent; `omp` (oh-my-pi) also ships.** agentdev is
+> **Claude Code is the primary agent; `omp` (oh-my-pi) and `pi` also ship.** agentdev is
 > agent-agnostic by design — the home is just "the home dir(s) for *this* agent." See
 > [`VISION.md`](./VISION.md) and [`DESIGN.md`](./DESIGN.md).
 
@@ -36,7 +36,7 @@ the agent writes come out owned by *you*, not `root`. Rootless podman is what de
 
 - **No root daemon.** Containers run as your user; nothing privileged runs on the host.
 - **`--userns=keep-id` maps the container user to your host UID**, so every file written into
-  the profile folder and the workspace is host-owned. This is the linchpin of the whole
+  the mounted home and the workspace is host-owned. This is the linchpin of the whole
   plain-folder model and of the clean-room ownership guarantees.
 
 A rootful Docker daemon runs as root and writes **root-owned** files into those folders, which
@@ -122,7 +122,8 @@ itself, headless, then exit. Here's a whole file; each block is explained below 
     "agent_folder": "~/.agentdev/homes/myproject",                        // host dir mounted as the agent's home (omit = ephemeral)
     "read_only":  [ { "src": "~/ref/standards", "dest": "/standards" } ], // folder pairs, bind-mounted read-only
     "read_write": [ { "src": "~/out/shared",    "dest": "/shared" } ],    // folder pairs, bind-mounted read-write
-    "copy_files": [ { "src": "~/vault/prod.env", "dest": ".env" } ],      // files COPIED into the working-folder root
+    "history": "~/.agentdev/myproj/history",                              // optional: send THIS session's history to a separate host folder (agentdev knows where it lands in the home)
+    "memory":  "~/.agentdev/myproj/memory",                              // optional: send THIS session's memory to a separate host folder
     "tty_devices": ["/dev/ttyUSB0"]                                       // serial/tty devices to pass through (/dev/ttyX)
   },
 
@@ -170,13 +171,17 @@ Every key is optional and takes a built-in default; omit a whole block to accept
 ### mounts — agent home, folders, copied files, tty devices
 
 - `agent_folder` — a host directory bind-mounted as the agent's home (its `.claude` / `.omp` /
-  `.pi`). Omit it for an ephemeral home discarded on exit; point it at a kept folder to persist
-  across runs. You manage that folder yourself (`cp`, `git`, `rm`).
+  `.pi`), holding its config and, by default, its history and memory too. Omit it for an
+  ephemeral home discarded on exit; point it at a kept folder to persist across runs. You manage
+  that folder yourself (`cp`, `git`, `rm`).
 - `read_only` / `read_write` — arrays of `{ src, dest }` pairs that bind host **folders** at
   arbitrary container paths.
-- `copy_files` — an array of `{ src, dest }` files **copied** into the working-folder root (`src`
-  is a full or relative host path; `dest` is the name it gets there). Unlike `workspace.files`
-  (a read-only bind mount), these are real, editable copies.
+- `history` / `memory` — optional host folders (one path each). Set one only when you want **this
+  session's** history or memory written to a *separate* folder instead of inside `agent_folder` —
+  e.g. reuse one `agent_folder` for config across runs, but split each run's history/memory out
+  for later analysis. **You give the host folder; agentdev knows the exact place it belongs under
+  the agent's home and mounts it there.** Omit them and history/memory stay in `agent_folder` (or,
+  if that's omitted too, on the ephemeral container filesystem — lost on exit).
 - `tty_devices` — an array of serial/tty devices to pass through; each must be a `/dev/ttyX`.
 
 ### one-shot — run the agent headless (optional, last because it's the exception)
@@ -195,16 +200,17 @@ itself — in an interactive run you pick them inside the shell.
 ## Supported agents
 
 In `one-shot`, `agent` is a **short name** from the set below and agentdev maps it to the
-executable inside the container — you never write a container path. They store state
-differently, which is why only Claude gets the full mode set; the others support `clean` and
-named profiles but no separable memory layer. (The image also ships the
+executable inside the container — you never write a container path. They store state differently,
+so which of `mounts.history` / `mounts.memory` applies varies by agent. (The image also ships the
 [herdr](https://herdr.dev) orchestrator, which is not a coding agent.)
 
-| `one-shot.agent` | Agent | Home | `remember` (memory layer)? |
-|---|---|---|---|
-| `claude` | Claude Code | `~/.claude` + `~/.claude.json` | **yes** — memory is a separable folder |
-| `omp` | oh-my-pi | `~/.omp` | **no** — clean / named whole-home only |
-| `pi` | pi | `~/.pi` | **no** — clean / named whole-home only |
+| `one-shot.agent` | Agent | Home | `mounts.memory`? | `mounts.history`? |
+|---|---|---|---|---|
+| `claude` | Claude Code | `~/.claude` + `~/.claude.json` | **yes** — `projects/<ws>/memory/` | **yes** — `projects/<ws>/` |
+| `omp` | oh-my-pi | `~/.omp` | **yes** — `agent/memories/` | **no** — history is a DB |
+| `pi` | pi | `~/.pi` | **no** — no memory store | **yes** — `agent/sessions/` |
+
+Setting a redirect an agent doesn't support aborts with a clear message.
 
 Every agent's credentials come from the same `.env`/`.envrc` mechanism.
 
@@ -228,20 +234,22 @@ private, then inject it as `.env` via `workspace.files`.)
 
 ## What isolation does and doesn't cover
 
-A profile isolates the agent's **on-disk home**. It does **not** isolate your **claude.ai
-account**: if you log the agent into a subscription, account-level **connectors** (Atlassian,
-Microsoft 365, Slack, …) appear even in a clean room — they follow the login, not the profile.
+The mounted home isolates the agent's **on-disk state**. It does **not** isolate your
+**claude.ai account**: if you log the agent into a subscription, account-level **connectors**
+(Atlassian, Microsoft 365, Slack, …) appear even in a clean room — they follow the login, not
+the mounted home.
 To keep a run connector-free, authenticate with an API key via `.env` (no subscription login).
 See [`docs/managing-context-and-memory.md`](./docs/managing-context-and-memory.md).
 
 ## Locked-down runs
 
 For an untrusted task, combine `network.mode: "allowlist"` (+ egress `log`), a read-only
-workspace (`workspace.mode: "ro"`), and no SSH (`workspace.ssh: false`). The egress log is a
-plain file you read with ordinary tools:
+workspace (`workspace.mode: "ro"`), and no SSH (`workspace.ssh: false`). The egress log is
+written into the agent home, so set `mounts.agent_folder` to keep it; then read it with ordinary
+tools:
 
 ```bash
-cut -f2,4 <profile>/agentdev-egress.log | sort | uniq -c | sort -rn
+cut -f2,4 <agent_folder>/agentdev-egress.log | sort | uniq -c | sort -rn
 ```
 
 For fanning prompts across many tasks in parallel, see
@@ -251,7 +259,7 @@ For fanning prompts across many tasks in parallel, see
 
 ```
 agentdev              launcher (bash)
-lib/                  config, mounts, model, net, seed, profile, memory, meta (+ jsoncfg.py, allowcheck.py)
+lib/                  config, agents, mounts, net (+ jsoncfg.py — the strict schema/reader)
 image/                Containerfile + entrypoint.sh + proxy.py (egress allowlist sidecar) -> ghcr.io/gherlein/agentdev
 templates/<agent>/    per-agent starter kits (copy and edit)
 examples/             worked config scenarios and the one-shot orchestrator
@@ -260,13 +268,16 @@ tests/                offline smoke + matrix, live tiers, proxy unit tests
 
 ## Status
 
-**Designed (this README):** interactive by default with an optional `one-shot` block; `agent` as a full executable path;
-credentials and model routing via `.env`/`.envrc`; `workspace` with `mount` name, `mode`,
-`ssh`/`usb`, and injected `files`; folder-only `mounts`; `remember`/memory as a Claude-only
-layer; `omp` as a second agent; `templates/<agent>/` starter kits; opencode removed.
+**Implemented:** interactive by default with an optional `one-shot` block; `agent` as a **short
+name** (`claude`/`omp`/`pi`) agentdev maps to an executable; credentials and model routing via
+`.env`/`.envrc`; `workspace` with `mount` name, `mode`, `ssh`/`usb`, and injected `files`; `mounts`
+with `agent_folder`, `read_only`/`read_write` pairs, optional `history`/`memory` redirects, and
+`tty_devices`; `omp` and `pi` as additional agents; `templates/<agent>/` starter kits. The launcher
+and `lib/` parse this schema; retired keys (`profile`, `auth`, `template`, `sandbox`, `agent`/`model`
+objects, `mounts.devices`, …) are rejected fail-closed with migration hints. opencode removed.
 
-**Being implemented:** the launcher and `lib/` still parse the prior schema (`agent.name`, the
-`model` object, `auth`, `template`, `sandbox`). The code is being updated to match this spec.
+**Next:** deepen `omp` and `pi` — their headless-prompt command and model environment are
+best-effort today; Claude is fully wired.
 
 **Deliberately out of scope:** workspace copy-on-write / patch-review, overlay/immutable
 templates, fleet / fan-out, cost accounting, and any profile/memory management subcommands —

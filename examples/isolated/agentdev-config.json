@@ -1,43 +1,10 @@
 {
-  "agent": {
-    "name": "claude",
-    "image": "ghcr.io/gherlein/agentdev:latest"
-  },
-  "profile": {
-    "mode": "clean",
-    "keep": false
-  },
-  "auth": {
-    "mode": "api-key-env"
-  },
-  "template": {
-    "include": [
-      "CLAUDE.md",
-      "settings.json"
-    ]
-  },
+  "image": "ghcr.io/gherlein/agentdev:latest",
   "workspace": {
-    "trust": "workspace-only",
-    "workdir": "."
+    "source": ".", "mount": "work", "mode": "ro", "ssh": false, "usb": false,
+    "files": [ { "source": "./secret.env", "name": ".env" } ]
   },
-  "network": {
-    "mode": "allowlist",
-    "allow": [
-      "api.anthropic.com"
-    ],
-    "log": true,
-    "mitm": false
-  },
-  "mounts": {
-    "workspace": "ro",
-    "confirm_rw": true,
-    "rw_allow": [],
-    "read_only": {},
-    "read_write": {}
-  },
-  "sandbox": {
-    "ssh": false,
-    "usb": false,
-    "host_ca": true
-  }
+  "network": { "mode": "allowlist", "allow": ["api.anthropic.com"], "log": true },
+  "mounts": { "agent_folder": "./.agent-home" },
+  "one-shot": { "agent": "claude", "model": "claude-opus-5-5", "prompt": "task.md" }
 }

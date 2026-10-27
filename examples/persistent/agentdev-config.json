@@ -1,0 +1,9 @@
+{
+  "image": "ghcr.io/gherlein/agentdev:latest",
+  "workspace": { "source": ".", "mount": "work" },
+  "mounts": {
+    "agent_folder": "~/.agentdev/homes/myproject",
+    "history": "~/.agentdev/homes/myproject-runs/history",
+    "memory":  "~/.agentdev/homes/myproject-runs/memory"
+  }
+}
