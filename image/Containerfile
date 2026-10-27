@@ -132,16 +132,15 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
 # herdr — agent orchestrator (tmux-like) used to drive agentdev sessions
 RUN curl -fsSL https://herdr.dev/install.sh | sh && herdr --version
 
-# opencode
-RUN curl -fsSL https://opencode.ai/install | bash
-ENV PATH="/home/developer/.opencode/bin:${PATH}"
-
 # uv (with retry)
 RUN for i in 1 2 3; do curl -LsSf https://astral.sh/uv/install.sh | sh && break || sleep 5; done
 ENV PATH="/home/developer/.local/bin:${PATH}"
 
 # oh-my-pi (omp) agent — prebuilt binary (no bun in this image)
 RUN curl -fsSL https://omp.sh/install | sh -s -- --binary && omp --version
+
+# pi — minimal terminal coding harness (@mariozechner/pi-coding-agent), installed via npm global
+RUN npm install -g @mariozechner/pi-coding-agent && command -v pi
 
 # WeasyPrint as an isolated uv tool (pandoc --pdf-engine=weasyprint)
 RUN /home/developer/.local/bin/uv tool install weasyprint

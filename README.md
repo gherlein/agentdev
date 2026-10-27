@@ -1,41 +1,54 @@
 # agentdev
 
-Disclaimer: This works for me -- that's the entire guarantee. Built with AI in the loop, so check your own biases before you love it or hate it on principle. Use at your own risk, fork freely, and don't @ me when it explodes. (But do drop me a note if it helps -- pay it forward.)
+Run a coding agent in an isolated container where **one JSON config file defines the entire
+launch**. By default a run is **interactive** — agentdev drops you into a shell and *you* run
+the agent (`claude`, `omp`, `pi` supported out of the box). Add a **`one-shot`** block to the config and agentdev runs the
+agent itself, headless, on a prompt, then exits.
 
-Run a coding agent (Claude Code) in an isolated container where **one JSON config file
-defines the entire launch**: the agent, the model it connects to, an optional one-shot
-prompt, exactly which host folders are mounted (and whether each is read-only), and how
-much of the internet the container can reach. Reading the file tells you what the
-container gets — nothing important comes from outside it, and an unknown or invalid key
-aborts the launch.
+The agent's **home** is just host folders you mount in (`mounts.agent_folder` and
+`mounts.read_write`) — never your real `~/.claude` unless you point it there. For a **clean
+room**, mount **empty** folders so history starts fresh; to **persist** what the agent learned
+and did across runs, add its **memory** folder and its **project (transcript)** folders to
+`mounts.read_write`. They're plain directories you own — `cp`, `rm`, `tar`, `git` them — and
+agentdev never versions them or hides them behind management subcommands. We ship example
+configs for the common setups.
 
-The agent's **home** is a swappable **profile folder** on the host — never your real
-`~/.claude` — so you can run a **clean room** (no past), a **remembering agent with clean
-history**, or a **named profile** that carries everything forward. Profiles and memory
-stores are plain directories; agentdev never versions them and offers no management
-subcommands — manage them with `cp`, `rm`, `tar`, and `git`.
-
-> **Claude Code today; other agents next.** agentdev is agent-agnostic by design — a
-> profile is "the home dir(s) for *this* agent." See [`VISION.md`](./VISION.md) for the
-> full picture and [`DESIGN.md`](./DESIGN.md) for the implementation.
+> **Claude Code is the primary agent; `omp` (oh-my-pi) also ships.** agentdev is
+> agent-agnostic by design — the home is just "the home dir(s) for *this* agent." See
+> [`VISION.md`](./VISION.md) and [`DESIGN.md`](./DESIGN.md).
 
 agentdev is **self-contained**: it ships its own container image, entrypoint, and mount
 library, and depends on nothing but `podman` and `python3`.
 
-📖 **New here? The [User Guide](./docs/user-guide.md) is the complete walkthrough** —
-install, the config file, modes, auth, mounts, network, skills, and troubleshooting.
+## Prerequisites
+
+- **Linux** with **rootless [podman](https://podman.io)** — the reason it must be podman is below.
+- **python3** — the launcher parses the JSON config with it (already a Claude Code prerequisite).
+- **The container image** — pulled from ghcr.io on first launch, or built locally with `make build`.
+- **Credentials in your environment** — the agent reads `ANTHROPIC_API_KEY` (and any model
+  routing) from a `.env`/`.envrc` in the workspace; agentdev passes none through its config.
+
+### Why podman (and why rootless)
+
+agentdev's core promise is that the agent's home and your workspace are **plain folders you
+own** — seed, `cp`, `git`, or `rm` them with no special tooling. That only holds if the files
+the agent writes come out owned by *you*, not `root`. Rootless podman is what delivers it:
+
+- **No root daemon.** Containers run as your user; nothing privileged runs on the host.
+- **`--userns=keep-id` maps the container user to your host UID**, so every file written into
+  the profile folder and the workspace is host-owned. This is the linchpin of the whole
+  plain-folder model and of the clean-room ownership guarantees.
+
+A rootful Docker daemon runs as root and writes **root-owned** files into those folders, which
+breaks that model — so podman rootless is a hard requirement today. (Rootless Docker preserves
+the same ownership model and could be supported later; rootful Docker can't be, without
+`--user` entrypoint surgery.)
 
 ## Install
 
-agentdev is **Linux-only** — it uses rootless `podman` and `--userns=keep-id`. Install it
-from Homebrew to just use it, or from this repo to develop it.
+See [Prerequisites](#prerequisites) for requirements (Linux + rootless podman).
 
 ### Install from Homebrew
-
-The simplest path: a tagged release, with Homebrew managing `podman` for you.
-
-**Prerequisite:** [Homebrew on Linux](https://docs.brew.sh/Homebrew-on-Linux) on your PATH
-(`brew --version` works).
 
 ```bash
 brew tap gherlein/tap
@@ -43,245 +56,189 @@ brew trust gherlein/tap          # a tap must be trusted before its formulae loa
 brew install agentdev
 ```
 
-What this does: installs the `agentdev` launcher (symlinked into Homebrew's `bin`) and
-`podman`, and unpacks the agentdev tree under `$(brew --prefix agentdev)/libexec`. The
-container image is **not** bundled — it is pulled from `ghcr.io` on first launch
-(`podman run --pull=missing`); pre-pull it with
-`podman pull ghcr.io/gherlein/agentdev:latest`. Rootless podman also needs your distro's
-user-namespace plumbing (`subuid`/`subgid`, `uidmap`); verify once with `podman info`.
-
-Upgrade or remove:
-
-```bash
-brew upgrade agentdev
-brew uninstall agentdev
-```
+Homebrew installs the launcher and `podman`; the container image is pulled from ghcr.io on
+first launch. Upgrade/remove with `brew upgrade agentdev` / `brew uninstall agentdev`.
 
 ### Install from the repo
 
-Best for developing agentdev or running unreleased changes — the launcher runs straight
-from your checkout.
-
-**Prerequisites:** `git`, `podman`, `python3`, and Linux.
-
 ```bash
 git clone https://github.com/gherlein/agentdev ~/src/agentdev && cd ~/src/agentdev
-make build                       # build the container image once (ghcr.io/gherlein/agentdev:latest)
-make install                     # symlink the launcher into ~/.local/bin (PREFIX overridable)
+make build                       # build the container image once
+make install                     # symlink the launcher into ~/.local/bin
 ```
 
-`make install` **symlinks** the launcher rather than copying it, so your edits and
-`git pull` take effect immediately; the launcher resolves its sibling `lib/`, `templates/`,
-and `image/` through that symlink (so the tree must stay in place). Ensure `~/.local/bin` is
-on your PATH. `make` with no target lists every target (`build`, `test`, `lint`, `install`,
-`uninstall`, `clean`, …); `make uninstall` removes the symlink.
-
-The image bundles the full localdev toolset — Node LTS (nvm) + TypeScript/pnpm/eslint/
-prettier, Go + TinyGo + gopls/dlv/goimports/kit/golangci-lint, `uv`, `gh`, podman-in-podman,
-pandoc + WeasyPrint, the networking/SDR stack (nmap, tshark, aircrack-ng, hackrf, rtl-sdr,
-soapysdr, hamlib, ax25, gpsd, usbutils) — plus the **[herdr](https://herdr.dev)** agent
-orchestrator and the Claude Code CLI.
+`make install` **symlinks** the launcher (it sources `lib/`, `templates/`, and `image/` from
+the checkout), so edits and `git pull` take effect immediately. `make` with no target lists
+every target; `make uninstall` removes the symlink.
 
 ## Run it
 
-Create an `agentdev-config.json` (copy one from [`examples/`](./examples)) and launch:
-
 ```bash
 cd ~/src/my-project
-cp ~/src/agentdev/examples/minimal/agentdev-config.json .
-
-agentdev --dry-run          # print the settled plan and the exact podman command
-agentdev                    # launch an interactive shell; run `claude` inside
-
-# Run the agent once, headless, on a prompt from a file, then exit:
-echo "fix the failing test" > task.md
-agentdev --prompt task.md
+cp -r ~/src/agentdev/templates/claude ./agentdev && cp agentdev/agentdev-config.json .
+<edit config>
+agentdev --dry-run          # print the settled plan 
+agentdev                    # no one-shot block -> a shell; run `claude` inside
 ```
 
-Because the config file carries everything, the command line is just three flags:
+The command line is tiny — the config file carries everything:
 
 | Flag | Effect |
 |---|---|
-| `-c`, `--config <path>` | select the config file (else `$AGENTDEV_CONFIG`, else `./agentdev-config.json`) |
+| `-c`, `--config <path>` | optionally select the config file (else `$AGENTDEV_CONFIG`, else `./agentdev-config.json`) |
 | `--dry-run` | print the settled plan and the `podman` command, then exit — launch nothing |
-| `--prompt <file>` | run the agent once, headless, on the prompt in `<file>`, then exit (overrides `prompt.file`) |
+| `--prompt <file>` | run one-shot on this prompt file (sets/overrides `one-shot.prompt`) |
 
-That is the entire surface — there are no modes, policies, or subcommands on the command
-line. (Append `-- COMMAND` to run a command instead of the interactive shell; `-h` prints
-usage.) Everything else lives in the config file, described next.
+(Append `-- COMMAND` to run a command instead of the interactive shell.)
 
-## The config file
+## Configuration
 
-One JSON file is the whole truth. Reading it tells you exactly what the container gets.
+One JSON file is the whole truth. It's validated **fail-closed** — an unknown key, wrong
+type, or bad value aborts before the container starts and names the offender. Relative paths
+resolve against the **config file's directory**. Keys beginning with `//` are comments.
 
-**How it is found.** `-c <path>` on the command line, else `$AGENTDEV_CONFIG`, else
-`./agentdev-config.json` in the current directory. If none exists, agentdev refuses to
-launch.
-
-**How it is read.**
-
-- **Fail-closed.** The file is validated against a strict schema *before any key is read*.
-  An unknown or misspelled key, a wrong type, or a value outside its allowed set aborts the
-  launch and names the offending key — a typo in `"netwrok"` is an error, never a silently
-  ignored security setting.
-- **Self-contained.** A key the file omits takes its built-in default; nothing comes from a
-  user-level config file or an environment variable. There is no hidden layering.
-- **Relative paths** (mount sources, `template.source`, `workspace.source`, `prompt.file`)
-  resolve against the **config file's own directory**, so a committed config means the same
-  thing wherever it is launched from.
-- **Comments.** Any key beginning with `//` is ignored, at every level.
-
-### Every key (all optional; defaults shown)
+A config declares the shared container setup. By default that's an **interactive** run — you
+get a shell and run the agent yourself. Add a `one-shot` block to make agentdev run the agent
+itself, headless, then exit. Here's a whole file; each block is explained below it.
 
 ```jsonc
 {
-  "agent": {
-    "name":  "claude",                            // only "claude" so far
-    "image": "ghcr.io/gherlein/agentdev:latest"   // pin by digest for a reproducible run
-  },
-  "model": {
-    "id":       "",                               // -> ANTHROPIC_MODEL (empty = agent default)
-    "provider": "anthropic",                      // anthropic | bedrock | vertex
-    "base_url": "",                               // a gateway or self-hosted endpoint URL
-    "pass_env": []                                // host env var names to forward (credentials)
-  },
-  "prompt": {
-    "file": ""                                    // run headless on this file, then exit
-  },
-  "profile": {
-    "mode":          "clean",                     // clean | remember | profile
-    "name":          "",                          // profile mode: which named profile
-    "memory_store":  "default",                   // remember mode: which memory store
-    "keep":          false,                        // clean mode: keep the throwaway profile
-    "profiles_root": "~/.agentdev/profiles",
-    "clean_root":    "~/.cache/agentdev/clean",
-    "memory_root":   "~/.agentdev/memory"
-  },
-  "template": {
-    "source":  "~/.agentdev/templates/default",   // seed template for a fresh profile
-    "include": ["CLAUDE.md","settings.json","hooks","skills",".mcp.json"]
-  },
-  "auth": {
-    "mode": "auto"                                // auto | api-key-env | interactive | inherit-credentials
-  },
+  "image": "ghcr.io/gherlein/agentdev:latest",   // container image (pin by digest for reproducibility)
+
   "workspace": {
-    "source":  ".",                               // host folder mounted at /<basename> (default: config dir)
-    "trust":   "skip-permissions",                // skip-permissions | workspace-only | prompt
-    "workdir": "."                                // entry folder: the shell's cwd (relative to the workspace)
+    "source": ".",                 // host folder to mount
+    "mount":  "work",              // its name in the container -> /work   (default: basename of source)
+    "mode":   "rw",                // rw | ro
+    "ssh":    true,                // mount host ~/.ssh + forward the agent socket
+    "usb":    true,                // pass /dev/bus/usb
+    "files": [                     // host files dropped INTO the working folder, read-only, by a chosen name
+      { "source": "~/vault/prod.env", "name": ".env" }
+    ]
   },
-  "network": {
-    "mode":  "off",                               // off | none | allowlist
-    "allow": [],                                  // allowlist: reachable host[:port] rules
-    "log":   false,                               // record egress to <profile>/agentdev-egress.log
-    "mitm":  false                                // per-URL filtering (terminates TLS)
-  },
+
+  "network": { "mode": "off", "allow": [], "log": false, "mitm": false },  // off | none | allowlist
+
   "mounts": {
-    "workspace":  "rw",                           // rw | ro (the workspace mount mode)
-    "confirm_rw": false,                          // prompt before each read-write mount
-    "rw_allow":   [],                             // pre-approve rw sources under confirm_rw
-    "read_only":  {},                             // { "host/src": "dest" } read-only mounts
-    "read_write": {},                             // { "host/src": "dest" } read-write mounts
-    "devices":    []                              // host device nodes to pass through
+    "agent_folder": "~/.agentdev/homes/myproject",                        // host dir mounted as the agent's home (omit = ephemeral)
+    "read_only":  [ { "src": "~/ref/standards", "dest": "/standards" } ], // folder pairs, bind-mounted read-only
+    "read_write": [ { "src": "~/out/shared",    "dest": "/shared" } ],    // folder pairs, bind-mounted read-write
+    "copy_files": [ { "src": "~/vault/prod.env", "dest": ".env" } ],      // files COPIED into the working-folder root
+    "tty_devices": ["/dev/ttyUSB0"]                                       // serial/tty devices to pass through (/dev/ttyX)
   },
-  "sandbox": {
-    "ssh":     true,                              // host SSH keys + agent socket
-    "usb":     true,                              // /dev/bus/usb
-    "host_ca": true                               // host extra TLS trust anchors
+
+  // Omit "one-shot" for an interactive shell; include it to run the agent headless, then exit:
+  "one-shot": {
+    "agent":  "claude",                              // supported agent: claude | pi | omp (agentdev maps it to the in-container executable)
+    "model":  "claude-opus-5-5",                     // model name (optional; agent default if omitted)
+    "prompt": "task.md"                              // the prompt file
   }
 }
 ```
 
-### What each group does
+Every key is optional and takes a built-in default; omit a whole block to accept its defaults.
 
-- **`agent`** — which agent and which container image. `name` is `claude` for now; pin
-  `image` by digest (`make digest` prints the ref) for a reproducible run. Examples use the
-  moving `:latest` tag for readability.
-- **`model`** — `id` → `ANTHROPIC_MODEL`; `provider` selects `anthropic` / `bedrock`
-  (`CLAUDE_CODE_USE_BEDROCK`) / `vertex` (`CLAUDE_CODE_USE_VERTEX`); `base_url` points at a
-  gateway or self-hosted endpoint; `pass_env` forwards host variables **by name**, so secrets
-  never appear in argv or `--dry-run`. Under an allowlist the model's endpoint must itself be
-  allowed, or the launch aborts.
-- **`prompt`** — `file` runs the agent headless on that prompt, then exits (the `--prompt`
-  flag overrides it).
-- **`profile`** — `mode` picks clean / remember / named (see **Modes**); `name` and
-  `memory_store` feed the latter two; `keep` retains a clean run; the `*_root` keys say where
-  the plain folders live.
-- **`template`** — the authored config copied into a fresh profile: the `source` folder and
-  the `include` list of items to seed.
-- **`auth`** — `auto` detects what the host uses; `api-key-env` forwards `ANTHROPIC_API_KEY`
-  by name and seeds no credential file; `interactive` logs in inside the container;
-  `inherit-credentials` copies the host's subscription login into a **named** profile (set on
-  clean/remember it aborts — a throwaway home must not hold a copied secret).
-- **`workspace`** — `source` is the host folder mounted at `/<basename>` (default: the config
-  file's directory); `trust` controls the per-project trust dialog; `workdir` is the entry
-  folder the shell starts in.
-- **`network`** — `off` (full internet, default), `none` (no network), or `allowlist` (only
-  `allow` destinations, via a filtering proxy sidecar, with optional `log` and `mitm`).
-- **`mounts`** — the `workspace` mode (`rw`/`ro`), extra `read_only` / `read_write` folder
-  maps and `devices`, plus a `confirm_rw` gate with its `rw_allow` pre-approvals. Nothing is
-  mounted implicitly.
-- **`sandbox`** — host passthroughs, each default `true`: `ssh` keys + agent, `usb`
-  (`/dev/bus/usb`), and `host_ca` (extra TLS anchors).
+### workspace — the project folder, named, plus injected files
 
-Each seeded profile also records `agentdev.meta.json` (template, mode, created-at) and
-`agentdev.lock` (resolved image digest, Claude Code version, template + mount hashes), so a
-profile is self-describing and a run is reproducible.
+- `source` — the host folder to mount; it appears at `/<mount>` and the agent starts there.
+- `mount` — the container-side name for that folder (default: the source's basename).
+- `mode` — `rw` or `ro`.
+- `ssh` — passes your host `~/.ssh` keys and the agent socket into the container.
+- `usb` — passes `/dev/bus/usb` into the container.
+- `files` — each `{source, name}` bind-mounts a host file into the working directory, read-only,
+  under a name you choose, so you can **inject a `.env` or `.envrc` from anywhere on the host
+  without it ever living in the project tree**.
 
-Preview any config with `--dry-run`. See [`docs/user-guide.md`](./docs/user-guide.md) for the
-narrative walkthrough and [`DESIGN.md`](./DESIGN.md) for the schema internals.
+### Environment & credentials
 
-## Modes
+**agentdev forwards no credentials through the config.**
 
-`profile.mode` chooses where the agent's home lives and what survives:
+- Everything the agent needs — `ANTHROPIC_API_KEY`, `AWS_*`, a gateway `ANTHROPIC_BASE_URL`,
+  `CLAUDE_CODE_USE_BEDROCK`, model routing — comes from a **`.env` or `.envrc` in the workspace
+  launch folder**.
+- An interactive shell loads it via `direnv`; a one-shot run sources it before invoking the agent.
+- Inject that file with `workspace.files` to keep secrets out of your repo.
+- There are no `auth`, `pass_env`, or `provider` keys in the config.
 
-| `profile.mode` | Memory | History | Lifetime |
+### network
+
+- `off` — full internet (the default).
+- `none` — no network at all.
+- `allowlist` — only `network.allow` destinations are reachable, via a filtering proxy sidecar,
+  with optional egress `log` and per-URL `mitm`; add your model's host (e.g. `api.anthropic.com`)
+  to `allow`.
+
+### mounts — agent home, folders, copied files, tty devices
+
+- `agent_folder` — a host directory bind-mounted as the agent's home (its `.claude` / `.omp` /
+  `.pi`). Omit it for an ephemeral home discarded on exit; point it at a kept folder to persist
+  across runs. You manage that folder yourself (`cp`, `git`, `rm`).
+- `read_only` / `read_write` — arrays of `{ src, dest }` pairs that bind host **folders** at
+  arbitrary container paths.
+- `copy_files` — an array of `{ src, dest }` files **copied** into the working-folder root (`src`
+  is a full or relative host path; `dest` is the name it gets there). Unlike `workspace.files`
+  (a read-only bind mount), these are real, editable copies.
+- `tty_devices` — an array of serial/tty devices to pass through; each must be a `/dev/ttyX`.
+
+### one-shot — run the agent headless (optional, last because it's the exception)
+
+**Omit this block for an interactive shell.** Include it and agentdev runs the agent itself on
+the prompt, then exits.
+
+- `agent` — a **supported-agent name** (`claude`, `pi`, `omp`) that agentdev maps to the
+  executable inside the container; you never write a container path.
+- `model` — the model name (optional; the agent's default if omitted).
+- `prompt` — the prompt file; `--prompt <file>` sets or overrides it from the CLI.
+
+`agent` and `model` live here because this is the only mode where agentdev launches the agent
+itself — in an interactive run you pick them inside the shell.
+
+## Supported agents
+
+In `one-shot`, `agent` is a **short name** from the set below and agentdev maps it to the
+executable inside the container — you never write a container path. They store state
+differently, which is why only Claude gets the full mode set; the others support `clean` and
+named profiles but no separable memory layer. (The image also ships the
+[herdr](https://herdr.dev) orchestrator, which is not a coding agent.)
+
+| `one-shot.agent` | Agent | Home | `remember` (memory layer)? |
 |---|---|---|---|
-| `clean` | fresh | fresh | throwaway, deleted on exit (`profile.keep: true` to retain) |
-| `remember` (+ `profile.memory_store`) | persistent store | fresh | home discarded; store kept |
-| `profile` (+ `profile.name`) | persistent | persistent | kept under `profile.profiles_root` |
+| `claude` | Claude Code | `~/.claude` + `~/.claude.json` | **yes** — memory is a separable folder |
+| `omp` | oh-my-pi | `~/.omp` | **no** — clean / named whole-home only |
+| `pi` | pi | `~/.pi` | **no** — clean / named whole-home only |
 
-Profiles and memory stores are plain folders under `profile.profiles_root` /
-`profile.memory_root`. Manage them yourself: `cp -a` to fork, `rm -rf` to delete, `tar` to
-move, `git` to version. agentdev seeds a profile on first launch and never silently
-re-seeds it; to re-seed, delete the folder and relaunch.
+Every agent's credentials come from the same `.env`/`.envrc` mechanism.
+
+## templates/<agent> — per-agent starter kits
+
+Copy-by-hand starting points, one folder per supported agent:
+
+```
+templates/
+├── claude/   # agentdev-config.json, CLAUDE.md, settings.json, env.example
+├── omp/      # agentdev-config.json, AGENTS.md, env.example
+└── pi/       # agentdev-config.json, AGENTS.md, env.example
+```
+
+```bash
+cp -r ~/src/agentdev/templates/claude ./agentdev   # then edit for your project
+```
+
+These are plain files you edit — not an auto-seeding mechanism. (`cp env.example` somewhere
+private, then inject it as `.env` via `workspace.files`.)
 
 ## What isolation does and doesn't cover
 
-A profile isolates the agent's **on-disk home** — config, history, memory, and local MCP
-servers (`.mcp.json`). A clean run starts from the seed template with none of your real
-`~/.claude`.
+A profile isolates the agent's **on-disk home**. It does **not** isolate your **claude.ai
+account**: if you log the agent into a subscription, account-level **connectors** (Atlassian,
+Microsoft 365, Slack, …) appear even in a clean room — they follow the login, not the profile.
+To keep a run connector-free, authenticate with an API key via `.env` (no subscription login).
+See [`docs/managing-context-and-memory.md`](./docs/managing-context-and-memory.md).
 
-It does **not** isolate your **claude.ai account**. If you log the agent into a Claude
-subscription, account-level **claude.ai connectors** (Atlassian, Microsoft 365, Slack,
-Claude Docs, …) appear in the session even in a clean room — they follow whoever you log in
-as, not the profile. A clean room is a clean *disk*, not a clean *account*. To keep a run
-connector-free, use `auth.mode: "api-key-env"` (no subscription login) or disconnect the
-connector in claude.ai. See
-[`docs/managing-context-and-memory.md`](./docs/managing-context-and-memory.md).
+## Locked-down runs
 
-## Skills from a shared store
-
-A profile's `.claude/skills/` is a mounted part of its home, so you can populate it from
-[`sm`](https://github.com/gherlein/sm)'s canonical skill store:
-
-```bash
-sm sync --copy --agent-home ~/.agentdev/profiles/research   # real dirs, container-safe
-```
-
-See [`docs/applying-sm-managed-skills.md`](./docs/applying-sm-managed-skills.md).
-
-## Locked-down (skill-evaluation) runs
-
-For an untrusted task or skill evaluation, use a config that locks the run down — allowlist
-network with egress logging, read-only workspace, confirmed rw mounts, api-key auth, no
-SSH. The ready example is [`examples/isolated/`](./examples/isolated):
-
-```bash
-agentdev -c examples/isolated/agentdev-config.json --prompt task.md
-```
-
-Egress is recorded (when `network.log: true`) to `<profile>/agentdev-egress.log`, a plain
-tab-separated file you read with ordinary tools:
+For an untrusted task, combine `network.mode: "allowlist"` (+ egress `log`), a read-only
+workspace (`workspace.mode: "ro"`), and no SSH (`workspace.ssh: false`). The egress log is a
+plain file you read with ordinary tools:
 
 ```bash
 cut -f2,4 <profile>/agentdev-egress.log | sort | uniq -c | sort -rn
@@ -290,36 +247,27 @@ cut -f2,4 <profile>/agentdev-egress.log | sort | uniq -c | sort -rn
 For fanning prompts across many tasks in parallel, see
 [`examples/one-shot-orchestrator/`](./examples/one-shot-orchestrator/).
 
-## Example configs
-
-- [`examples/minimal/`](./examples/minimal) — the smallest sensible starting point.
-- [`examples/profile-folder/`](./examples/profile-folder) — a folder-per-context setup with a `.envrc`.
-- [`examples/isolated/`](./examples/isolated) — a locked-down config (allowlist net, read-only workspace, no SSH, api-key auth).
-- [`examples/basic-skills/`](./examples/basic-skills) — a persistent profile that seeds a few basic skills from a template.
-
 ## Layout
 
 ```
 agentdev              launcher (bash)
-lib/                  config, mounts, model, net, seed, profile, memory, meta
-                      (+ jsoncfg.py schema/reader, allowcheck.py)
-image/                Containerfile + entrypoint.sh + proxy.py (egress allowlist sidecar)
-                      → ghcr.io/gherlein/agentdev
-templates/default/    seed template (CLAUDE.md, settings.json, hooks/, claude.json.seed)
-examples/             ready-to-copy configs and the one-shot orchestrator
-tests/                offline smoke + matrix, live and live-agent tiers, proxy unit tests
+lib/                  config, mounts, model, net, seed, profile, memory, meta (+ jsoncfg.py, allowcheck.py)
+image/                Containerfile + entrypoint.sh + proxy.py (egress allowlist sidecar) -> ghcr.io/gherlein/agentdev
+templates/<agent>/    per-agent starter kits (copy and edit)
+examples/             worked config scenarios and the one-shot orchestrator
+tests/                offline smoke + matrix, live tiers, proxy unit tests
 ```
 
 ## Status
 
-Implemented: one strict, fail-closed config file; `-c` / `$AGENTDEV_CONFIG` /
-`./agentdev-config.json` resolution; clean / remember / named modes; model selection
-(id / provider / base_url / forwarded credentials); `copy` template seeding with linting;
-`auto` / api-key / inherit-credentials / interactive auth; network `off` / `none` /
-`allowlist` with an egress proxy and logging; `--prompt` one-shot runs; plain-folder
-profiles and memory stores; and `--dry-run`.
+**Designed (this README):** interactive by default with an optional `one-shot` block; `agent` as a full executable path;
+credentials and model routing via `.env`/`.envrc`; `workspace` with `mount` name, `mode`,
+`ssh`/`usb`, and injected `files`; folder-only `mounts`; `remember`/memory as a Claude-only
+layer; `omp` as a second agent; `templates/<agent>/` starter kits; opencode removed.
 
-Not yet: agents other than Claude Code (the framing is in place; see `DESIGN.md` §10).
-Deliberately out of scope: workspace copy-on-write / patch-review, overlay templates,
-fleet / fan-out, cost accounting, and any profile/memory management subcommands — see
-[`VISION.md`](./VISION.md).
+**Being implemented:** the launcher and `lib/` still parse the prior schema (`agent.name`, the
+`model` object, `auth`, `template`, `sandbox`). The code is being updated to match this spec.
+
+**Deliberately out of scope:** workspace copy-on-write / patch-review, overlay/immutable
+templates, fleet / fan-out, cost accounting, and any profile/memory management subcommands —
+see [`VISION.md`](./VISION.md).
