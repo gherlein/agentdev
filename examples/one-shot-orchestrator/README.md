@@ -5,18 +5,19 @@ each launching an **agentdev** container to do one task, and collects each
 agent's result as a file.
 
 > **When to reach for this vs. `agentdev --prompt`.** For a single prompted run,
-> `agentdev --profile X --prompt task.md` is the one-liner — agentdev feeds the
-> file to the agent headless (see the root README). This example exists for the
-> step beyond that: fanning out *many* tasks in parallel, each with its own
-> container, and publishing each result **atomically** via a small in-container
-> `worker.sh`. The worker reads its task from a file too; it uses claude's own
-> `-p` internally because it runs the agent directly inside the container.
+> `agentdev --prompt task.md` is the one-liner — agentdev feeds the file to the
+> agent headless (see the root README). This example exists for the step beyond
+> that: fanning out *many* tasks in parallel, each with its own container and its
+> own generated config, and publishing each result **atomically** via a small
+> in-container `worker.sh`. The worker reads its task from a file too; it uses
+> claude's own `-p` internally because it runs the agent directly inside the
+> container.
 
 ## The model
 
 ```
 master (orchestrate.sh)
-  ├─ child 1: agentdev --clean -rw <ch>/w1 -- bash /external/w1/bin/worker.sh
+  ├─ child 1: agentdev -c <ch>/w1/agentdev-config.json -- bash /external/w1/bin/worker.sh
   │             └─ podman run --rm (FOREGROUND) ── container ── claude -p "<task>"
   │                  ▲ bind mount ▼
   │             host: <ch>/w1/{in,out}  ⇆  container: /external/w1/{in,out}
@@ -56,7 +57,7 @@ the profile, so results survive the container's `--rm` teardown.
 
 ## Run it for real
 
-Prerequisites: the agentdev image built (`agentdev build`), `agentdev` on `PATH`,
+Prerequisites: the agentdev image built (`make build`), `agentdev` on `PATH`,
 and an API key exported (headless `claude -p` can't do an interactive login):
 
 ```bash
@@ -85,7 +86,7 @@ at startup). `agentdev.log` and `stderr.log` sit beside each result for failures
 | `MAXJOBS` | `4` | Max concurrent containers |
 | `WORKSPACE` | fresh temp dir | Host dir mounted as the agent's workspace. Point it at a repo if the task needs code (note: it is mounted **read-write** and shared by all workers in a run — use a copy per worker if they must not collide) |
 | `CHANNEL_ROOT` | fresh temp dir | Where per-run `in/`,`out/` channels live |
-| `AGENTDEV_AUTH` | `api-key-env` | Passed to `agentdev --auth` |
+| `AGENTDEV_AUTH` | `api-key-env` | `auth.mode` written into each worker's config |
 | `AGENTDEV` | `agentdev` | The binary to invoke (the selftest overrides this) |
 
 ## Passing the task
@@ -128,5 +129,6 @@ concurrency and cleanup — launches the new siblings. Keep the topology flat.
   protocol. This is the point where a background process inside the container earns
   its keep — but it is a bigger design than this example.
 - **Shared identity across workers.** If the tasks should build on one profile's
-  memory/config, `agentdev profiles fork base wN` per worker (each fork is its own
-  single-instance folder) instead of clean mode.
+  memory/config, `cp -a base wN` per worker (each fork is its own single-instance
+  folder, pointed at by that worker's `profile.name`/`profiles_root`) instead of
+  clean mode.

@@ -2,29 +2,29 @@
 # fake-agentdev — a stand-in used ONLY by selftest.sh to exercise orchestrate.sh
 # without podman, an image, or the real agentdev.
 #
-# It mimics just enough of the one-shot contract: parse `-rw <hostdir>` and the
-# trailing `-- <cmd...>`, translate the in-container /external/<base> path back to
-# <hostdir>, and run the command on the host as a stub agent (AGENT_STUB=1). It is
-# NOT a sandbox and grants no isolation — it exists purely to prove the plumbing.
+# It mimics just enough of the one-shot contract: parse `-c <config>` and the
+# trailing `-- <cmd...>`, read the single read-write mount from the config, translate
+# the in-container destination path back to the host dir, and run the command on the
+# host as a stub agent (AGENT_STUB=1). It is NOT a sandbox and grants no isolation —
+# it exists purely to prove the plumbing.
 set -euo pipefail
 
-rwdir=""; cmd=()
+cfg=""; cmd=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -rw) rwdir="${2:?}"; shift 2 ;;
-    -ro) shift 2 ;;
-    --)  shift; cmd=("$@"); break ;;
-    --clean|--keep|--reseed|--dry-run|--login) shift ;;
-    --auth|--trust|--template|--profile|--remember) shift 2 ;;
-    *) shift ;;
+    -c|--config) cfg="${2:?}"; shift 2 ;;
+    --)          shift; cmd=("$@"); break ;;
+    --dry-run)   shift ;;
+    --prompt)    shift 2 ;;
+    *)           shift ;;
   esac
 done
-[[ -n "$rwdir" && ${#cmd[@]} -gt 0 ]] || { echo "fake-agentdev: bad args" >&2; exit 64; }
+[[ -n "$cfg" && ${#cmd[@]} -gt 0 ]] || { echo "fake-agentdev: bad args" >&2; exit 64; }
 
-# /external/<basename-of-rwdir>  ->  the real host dir
-base=$(basename "$rwdir")
+# Read the single read_write mapping from the config: source(host) -> dest(container).
+read -r rwdir dest < <(python3 -c 'import json,sys; m=json.load(open(sys.argv[1]))["mounts"]["read_write"]; k=next(iter(m)); print(k, m[k])' "$cfg")
 translated=()
-for a in "${cmd[@]}"; do translated+=("${a//\/external\/$base/$rwdir}"); done
+for a in "${cmd[@]}"; do translated+=("${a//$dest/$rwdir}"); done
 
 sleep "0.$(( RANDOM % 9 + 1 ))"          # pretend the agent took a moment
 AGENT_STUB=1 exec "${translated[@]}"

@@ -1,11 +1,15 @@
-# agentdev — Phase 1 Technical Design
+# agentdev — Technical Design
 
-> Companion to [`VISION.md`](./VISION.md). This document specifies **Phase 1** (Claude
-> Code only): the component breakdown, the CLI surface, the on-disk formats, and the two
-> algorithms that matter — **seeding** a profile and building the **mount plan** — in
-> enough detail to implement. It is deliberately scoped: everything the vision marks
-> Phase 2/3 (network allowlist, cow/patch workspace, `report`, overlay templates, fleet,
-> multi-agent) is out of scope here and called out in §11.
+> Companion to [`VISION.md`](./VISION.md). This document specifies the implementation
+> (Claude Code only): the component breakdown, the minimal CLI, the one config file, the
+> on-disk formats, and the two algorithms that matter — **seeding** a profile and building
+> the **mount plan**. It describes the code as it stands.
+>
+> **One config file defines the launch** (agent, model, optional one-shot prompt, mounts,
+> network), chosen by `-c` / `$AGENTDEV_CONFIG` / `./agentdev-config.json` and validated
+> fail-closed. The CLI is just `--dry-run`, `-c`, and `--prompt`; there are no management
+> subcommands. The deliberately out-of-scope items (workspace copy-on-write / patch-review,
+> overlay templates, fleet / fan-out, cost accounting, other agents) are listed in §11.
 
 **agentdev is self-contained.** It ships its own container image, its own entrypoint, and
 its own mount library — it does **not** depend on localdev's code, image, or launchers at
@@ -65,10 +69,13 @@ agentdev (this repo)
 │   ├── seed.sh                  ← template → profile (lint, copy, scaffold, .claude.json)
 │   ├── memory.sh                ← resolve a memory store; compute the deterministic path
 │   ├── config.sh                ← layered JSON/flag resolution (§5)
+│   ├── jsoncfg.py               ← dotted-key JSON reader (get | list | table | check)
+│   ├── net.sh                   ← network modes, proxy sidecar, egress report (§5.2)
 │   └── meta.sh                  ← write & read agentdev.meta.json / agentdev.lock
 ├── image/
 │   ├── Containerfile            ← builds ghcr.io/gherlein/agentdev (hardened, non-root)
-│   └── entrypoint.sh            ← UID/GID remap, host-home symlink, CA rebuild, gosu exec
+│   ├── entrypoint.sh            ← UID/GID remap, host-home symlink, CA rebuild, gosu exec
+│   └── proxy.py                 ← egress allowlist proxy, run as a sidecar from this image
 ├── templates/default/           ← the seed template (CLAUDE.md, settings.json, hooks/…)
 ├── tests/
 └── DESIGN.md / VISION.md / README.md
@@ -89,13 +96,16 @@ toolset** so the agent has everything to work with. Debian slim base, **non-root
 - **pandoc + WeasyPrint**, ffmpeg, imagemagick, qpdf (docs/media).
 - The **networking / wireless / SDR stack**: nmap, tshark, aircrack-ng, hackrf, rtl-sdr,
   soapysdr, hamlib, ax25, gpsd, usbutils, libpcap.
-- The **`opencode`** and **`omp`** agents (present as tools; agentdev Phase 1 still only
+- The **`opencode`** and **`omp`** agents (present as tools; agentdev still only
   *manages profiles for* Claude — see §10).
 - `ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]`, default `CMD ["bash"]`.
 
-The image is pinned **by digest** in config and in every profile's `agentdev.lock`, so a
-run is reproducible regardless of tag movement (VISION N2). The Claude Code version the
-installer resolves is captured into the lock at seed time (§6).
+For a reproducible run the image should be pinned **by digest** (`make digest` prints the
+pin-by-digest ref to set as `agent.image`); the shipped default and the examples use the
+moving `:latest` tag for readability. Whatever the config names, `agentdev.lock` records the
+image's resolved digest when the image is present locally (else the ref it was given), so a
+seeded profile is self-describing regardless of later tag movement (VISION N2). The Claude
+Code version the installer resolves is captured into the lock at seed time (§6).
 
 ### 2.2 The entrypoint (`image/entrypoint.sh`)
 
@@ -111,40 +121,44 @@ Authored fresh. Responsibilities, in order:
 
 ### 2.3 The mount library (`lib/mounts.sh`)
 
-Authored fresh. Provides the same *grammar* localdev popularized, as agentdev's own code:
+Authored fresh. Mounts come **only from the config file** — `mounts.read_only` /
+`mounts.read_write` maps and `mounts.devices` — with no CLI or env-var mount input:
 
-- `collect_mounts` — single entry point; unions three sources (CLI `-ro`/`-rw`/bare args,
-  the `AGENTDEV_MOUNTS` env var, and the config's `mounts.read_only`/`mounts.read_write`
-  maps) into `VOLUME_MOUNTS` / `DEVICE_MOUNTS` / `MOUNTS_CONTENT`, aborting on any error.
+- `collect_mounts` — single entry point; turns the config maps + devices into
+  `VOLUME_MOUNTS` / `DEVICE_MOUNTS` / `MOUNTS_CONTENT`. A source that is missing, not a
+  directory, or unreadable, or a device that does not exist, **aborts the launch**
+  (fail-closed) and names the offender.
 - `register_target` — claims one container-side target per source; a second claim on the
   same target is **always fatal** (collision detection). Reserves the workspace and the
-  managed agent paths up front.
-- `resolve_path` — normalizes/validates a host source (realpath; must exist & be readable).
+  managed agent paths (including `/home/developer/.agentdev-prompt`) up front.
+- `resolve_dir` — normalizes/validates a host source (must be an existing, readable
+  directory). Sources are anchored at the config file's directory (`anchor_path`).
 - `collect_host_ca_mount` — bind the host's extra TLS anchors read-only + set
-  `NODE_EXTRA_CA_CERTS`.
-- `handle_init_flag` — `agentdev init` writes a starter `./agentdev-config.json`.
+  `NODE_EXTRA_CA_CERTS` (gated by `sandbox.host_ca`).
 
 Grammar: `source = destination`, where destination is an absolute container path, a path
-relative to the workspace, or `&` to mirror a relative source's layout. Relative paths and
-`&` are portable/committable; absolute host paths are host-specific.
+relative to the workspace, or `&` to mirror a relative source's basename at the container
+root. Relative paths and `&` are portable/committable; absolute host paths are host-specific.
 
 ### 2.4 Control flow of one launch
 
 ```
-agentdev [flags] [mount-args...] [-- command...]
+agentdev [--dry-run] [-c <config>] [--prompt <file>] [-- command...]
   │
-  ├─ parse flags, resolve config (CLI > ./agentdev-config.json [or -c] > ~/.agentdev/config.json > defaults)
-  ├─ doctor preflight: ANTHROPIC_API_KEY?, podman?, agentdev image digest present?, template readable?
-  ├─ resolve MODE → resolve PROFILE path (clean_root/<run-id> | profiles_root/<name>)
+  ├─ resolve config path (-c > $AGENTDEV_CONFIG > ./agentdev-config.json)
+  ├─ load_config: validate against the schema (fail-closed), settle every key, anchor paths
+  ├─ resolve workspace (workspace.source) + model (setup_model, endpoint) + auth
+  ├─ resolve profile.mode → PROFILE path (clean_root/<run-id> | profiles_root/<name>)
   ├─ if profile absent OR clean:  seed.sh   (lint template, copy, scaffold, .claude.json, .gitignore guard)
   ├─ if remember:                 memory.sh (resolve store, compute $ENC, ensure mount point)
   ├─ lock the profile (flock) + assert no live container (named mode: refuse 2nd concurrent use — §2.5)
-  ├─ source lib/mounts.sh; collect_mounts "agentdev" "$DIR_NAME" "$@"; collect_host_ca_mount
+  ├─ collect_mounts (config maps + devices); collect_host_ca_mount (if sandbox.host_ca)
   ├─ build PROFILE_MOUNT (+ MEMORY_MOUNT); register_target the memory path
-  ├─ assemble podman argv (workspace, userns, ssh, ca, api-key, HOST_* env, profile)
-  │     --dry-run prints the settled config + seed plan + full mount plan and EXITS here
-  ├─ podman run ... ghcr.io/gherlein/agentdev@sha256:…  (bash by default, or trailing -- command)
-  └─ on exit (trap): rm -rf if clean & !--keep ; named/kept folders are left as-is
+  ├─ assert_model_endpoint_allowed (allowlist); setup_network (off | none | allowlist + proxy)
+  ├─ assemble podman argv (workspace, userns, usb, ssh, ca, api-key/pass_env, model, HOST_* env, profile)
+  │     --dry-run prints the settled plan + full podman command and EXITS here
+  ├─ podman run ... ghcr.io/gherlein/agentdev@sha256:…  (bash by default, --prompt, or trailing -- command)
+  └─ on exit (trap): teardown network; rm -rf if clean & !profile.keep ; named/kept folders left as-is
 ```
 
 ### 2.5 Single-instance guarantee for named profiles
@@ -169,17 +183,17 @@ The guarantee is layered, because no single mechanism covers every failure:
    cannot see a container that is still mounting the folder after its launcher was killed.
    So before launching we also refuse if `podman ps` shows a running container labeled
    `agentdev.profile=<path>`. This is the authoritative test of "is the folder being
-   written right now," and it points the user at `profiles gc` to reap an orphan.
+   written right now," and it prints the orphan's container id so the user can
+   `podman rm -f <id>`.
 
 3. **Fixed container name** (`--name agentdev-<sha256(path)[:12]>`). The runtime itself is
    the backstop: podman refuses a second `run` while a container with that name exists, and
    `--rm` frees the name exactly when the container stops. This holds even across `kill -9`
    of the launcher, closing the gap between layers 1 and 2.
 
-`profiles gc` ties it together: for each container labeled `agentdev.profile`, it tries to
-take that profile's `flock` — success means no launcher is attached (orphan → `podman rm
--f`, done while holding the lock so a fresh launch can't race in), failure means the run is
-live (left alone).
+Every container carries the `agentdev.profile=<path>` label, so an orphan left by a crashed
+run is easy to find (`podman ps -a --filter label=agentdev.profile`) and remove by hand.
+agentdev itself runs no reaper — there is no management surface.
 
 ---
 
@@ -187,130 +201,124 @@ live (left alone).
 
 | Component | File | Responsibility |
 |---|---|---|
-| **Launcher** | `agentdev` | Arg parse, orchestrate, assemble `podman run`, exit trap |
+| **Launcher** | `agentdev` | Arg parse (`-c`/`--dry-run`/`--prompt`/`--`), orchestrate, assemble `podman run`, exit trap |
 | **Image** | `image/Containerfile` | Hardened non-root image with Node + Claude Code CLI |
 | **Entrypoint** | `image/entrypoint.sh` | UID/GID remap, host-home symlink, CA rebuild, gosu exec |
-| **Mount library** | `lib/mounts.sh` | External-mount union, collisions, CA, SSH, `init` |
-| **Config resolver** | `lib/config.sh` | Merge CLI / per-project / user / defaults into one settled config |
-| **Profile manager** | `lib/profile.sh` | Resolve path per mode, create dir, single-instance guard (`flock` + live-container assert + fixed `--name`, §2.5), `fork`, `gc`, `rm` (plain folders) |
+| **Config resolver** | `lib/config.sh` | Resolve the one config file, validate it (via `jsoncfg.py`), settle every key; anchor relative paths at the file's dir |
+| **Schema/reader** | `lib/jsoncfg.py` | `get`/`list`/`table`/`check`/`validate`; the strict schema lives here |
+| **Mount library** | `lib/mounts.sh` | Config mount maps + devices → `podman` args, collisions, reserved targets, host CA |
+| **Model** | `lib/model.sh` | `model.*` → env args; derive the endpoint; allowlist interlock (`allowcheck.py`) |
+| **Profile manager** | `lib/profile.sh` | Resolve path per mode, create dir, single-instance guard (`flock` + live-container assert + fixed `--name`, §2.5) |
 | **Seeder** | `lib/seed.sh` | Lint template, copy `include`, build runtime scaffold + `.claude.json`, `.gitignore` secrets guard |
 | **Memory manager** | `lib/memory.sh` | Resolve store under `memory_root`, compute `$ENC`, create mount point |
+| **Network** | `lib/net.sh` | `network.*` → networks + proxy sidecar; teardown |
 | **Meta/lock writer** | `lib/meta.sh` | `agentdev.meta.json`, `agentdev.lock` (image digest, CLI ver, template hash) |
 
 The launcher sources the `lib/*.sh` files; shared state is a small set of globals
-(`VOLUME_MOUNTS`, `DEVICE_MOUNTS`, `MOUNTS_CONTENT`, `MOUNT_ERRORS`, plus agentdev's
-`PROFILE`, `MODE`, `ENC`, `MEMORY_STORE`).
+(`VOLUME_MOUNTS`, `DEVICE_MOUNTS`, `MOUNTS_CONTENT`, `MODEL_ARGS`, `NET_ARGS`, plus
+agentdev's `PROFILE`, `MODE`, `ENC`, `MEMORY_STORE`). There are **no management
+subcommands**: the launcher only launches (with `--dry-run` to preview).
 
 ---
 
-## 4. CLI surface & flag → behavior mapping
+## 4. CLI surface
 
 ```
-agentdev [MODE] [OPTIONS] [MOUNT-ARGS...] [-- COMMAND...]
+agentdev [--dry-run] [-c <config>] [--prompt <file>] [-- COMMAND...]
 ```
 
-### Modes (mutually exclusive; default from `[profile].default_mode`, built-in `clean`)
+The launcher does one thing: read a config file and launch the container. Its **only**
+options are:
 
-| Flag | Mode | Profile location | Config | Memory | History | Lifetime |
-|---|---|---|---|---|---|---|
-| `--clean` | clean room | `clean_root/<run-id>` | seeded | fresh | fresh | removed on exit (`--keep` retains) |
-| `--remember [store]` | remember | `clean_root/<run-id>` | seeded | **persistent** (mounted) | fresh | home removed; store persists |
-| `--profile <name>` | named | `profiles_root/<name>` | seeded once, drifts | persistent | persistent | kept |
-
-### Options
-
-| Flag | Effect | Phase |
-|---|---|---|
-| `-c, --config <path>` | Load this JSON config (default: `./agentdev-config.json` if present); grouped keys mirror every flag below | 1 |
-| `--template <path>` | Override `template.source` for this run | 1 |
-| `--auth <mode>` | `auto` \| `api-key-env` \| `interactive` \| `inherit-credentials` (default from config) | 1 |
-| `--login` | Shorthand for `--auth interactive` (Claude Pro/Max subscription login) | 1 |
-| `--workdir <path>` | **Entry folder**: the container shell's cwd. Relative to the workspace (`/<dir>`), or an absolute container path. Default `workspace.workdir`, else the workspace root | 1 |
-| `--keep` | Clean mode: don't delete the profile; print its path (default `profile.keep`) | 1 |
-| `--prompt <file>` | Run the agent once, headless, on the prompt read from `<file>` (path optional). The **only** supported way to pass a prompt — no inline `-p`. Mounts the file read-only and runs `claude --dangerously-skip-permissions -p "$(cat …)"` with stdin closed; cannot combine with `-- <command>` | 1 |
-| `--reseed` | Re-apply template **config** over an existing profile; leave memory/history | 1 |
-| `--trust <mode>` | `skip-permissions` \| `workspace-only` \| `prompt` (default from config) | 1 |
-| `--dry-run` | Print the settled config, seed plan, and full mount plan; **do not launch** | 1 |
-| `-ro <path>` / `-rw <path>` / `<path>` | External mounts (handled by `lib/mounts.sh`) | 1 |
-| `-- <command...>` | Run an arbitrary command instead of interactive `bash` (e.g. `-- bash -lc 'make test'`). Not for prompts — use `--prompt` | 1 |
-| `--net=allowlist`, `--cow-workspace`, `--patch-only`, `--budget`, `--fan-out N` | — | **2/3** |
-
-### Subcommands (management surface)
-
-| Command | Phase 1 behavior |
+| Option | Effect |
 |---|---|
-| `agentdev profiles ls\|show\|new\|rm\|fork\|gc` | Manage `profiles_root`; `gc` sweeps crashed `clean_root` leftovers **and reaps orphaned profile containers** (§2.5) |
-| `agentdev memory ls\|new\|rm` | Manage `memory_root` stores (plain folders) |
-| `agentdev doctor` | Check API key, podman, image digest, template readability + lint |
-| `agentdev init` | Write a starter `./agentdev-config.json` in the launch directory |
-| `agentdev build` | Build/tag the agentdev image locally from `image/Containerfile` |
-| `agentdev report`, `--net`, cow/patch | **Phase 2** |
+| `-c, --config <path>` | Select the config file (else `$AGENTDEV_CONFIG`, else `./agentdev-config.json`) |
+| `--dry-run` | Print the settled plan and the full `podman` command; **do not launch** |
+| `--prompt <file>` | Run the agent once, headless, on the prompt in `<file>` (overrides `prompt.file`; relative to the current dir). Mounts the file read-only and runs `claude --dangerously-skip-permissions -p "$(cat …)" </dev/null`; cannot combine with `-- <command>` |
+| `-- <command...>` | Run an arbitrary command instead of interactive `bash` (e.g. `-- bash -lc 'make test'`). Not for prompts |
+| `-h, --help` | Usage |
+
+There are **no modes, options, or subcommands beyond these**. Mode (`profile.mode`),
+model, auth, trust, mounts, network, and workspace all come from the config file (§5).
+Profiles and memory stores are plain folders managed with ordinary tools (no `profiles`/
+`memory`/`report`/`doctor`/`init`/`build` subcommands); the image is built with
+`make build`. A removed flag (`--clean`, `--net`, `-ro`, …) produces an error naming the
+config key to set, as a migration aid.
 
 **Default command.** The container's default command is interactive `bash`; the user runs
-`claude` inside. To start the agent on a prompt, `--prompt <file>` is the one supported
-path — it builds the headless command itself
-(`claude --dangerously-skip-permissions -p "$(cat <mounted-file>)" </dev/null`), so the
-prompt is never a shell-quoted argument and stdin never blocks. `-- <command>` runs an
-arbitrary non-prompt command instead (and is how `--fan-out` will later drive workers):
-`agentdev --clean --prompt task.md`.
+`claude` (or the `clauded` alias) inside. `--prompt`/`prompt.file` builds the headless
+command itself, so the prompt is never a shell-quoted argument and stdin never blocks.
 
 ---
 
 ## 5. Configuration & resolution
 
-The sole format is a **JSON config file**: every CLI flag has a matching key, and the keys
-are grouped and ordered consistently (**agent, profile, template, auth, workspace, network,
-mounts, sandbox**). Resolution order (first found wins per key; **CLI always wins**):
+The sole format is a **single JSON config file** that declares the whole launch. Keys are
+grouped and ordered consistently (**agent, model, prompt, profile, template, auth,
+workspace, network, mounts, sandbox**).
 
-1. CLI flags
-2. Project config — `-c/--config <path>`, else `./agentdev-config.json` if present
-   (committable; keep it portable — relative mount sources + `&`)
-3. User config — `~/.agentdev/config.json` (honors `$AGENTDEV_HOME`; host-specific
-   absolute paths live here)
-4. Built-in defaults
+### Resolution
 
-The launcher pre-parses `-c/--config` from anywhere in the argument stream (so it applies to
-subcommands too), stopping at `--` so a passthrough command's own flags are untouched. An
-explicit `-c` pointing at a missing file, or any config that fails to parse, **aborts before
-the container starts** (fail-closed). `lib/jsoncfg.py` is a tiny reader with a
-`get | list | table | check` interface that `lib/config.sh` uses to descend dotted keys.
+The config path is `-c/--config <path>`, else `$AGENTDEV_CONFIG`, else
+`./agentdev-config.json`; if none exists, agentdev refuses to launch. There is **no
+user-level config layer and no environment-variable mount input** — a key the file omits
+takes its built-in default, and nothing else. A `-c`/`$AGENTDEV_CONFIG` that points at a
+missing file, invalid JSON, or a schema violation **aborts before the container starts**
+(fail-closed). Relative paths (mount sources, `template.source`, `workspace.source`,
+`prompt.file`) resolve against the **directory that holds the file**, so the file means the
+same thing wherever it is launched from.
 
-External mounts (the configs' `mounts.read_only`/`mounts.read_write` maps, `-ro`/`-rw`,
-`AGENTDEV_MOUNTS`) combine as a **union**. The **profile**, **memory store**, and
-**template** each resolve to exactly one authoritative value — one agent home per run.
+### Strict schema
+
+`lib/jsoncfg.py` holds the schema and a `validate` verb; `load_config` runs it before
+reading any key. An **unknown or misspelled key, a wrong type, or a value outside its enum
+aborts** and names the offending key — a typo can never silently disable a setting. Keys
+starting with `//` are comments. The `get`/`list`/`table` verbs descend dotted keys for the
+settled values; booleans are real JSON booleans.
+
+The **profile**, **memory store**, **template**, and **workspace** each resolve to exactly
+one authoritative value — one agent home and one workspace per run.
 
 ```jsonc
-// ./agentdev-config.json  (every key shown; all are optional)
+// agentdev-config.json  (every key shown; all are optional; // keys are comments)
 {
   "agent": {
-    "name":  "claude",                               // Phase 1: the only value
+    "name":  "claude",                               // only "claude" so far
     "image": "ghcr.io/gherlein/agentdev@sha256:…"    // agentdev's own image, pinned by digest
   },
+  "model": {
+    "id":       "claude-opus-5-5",                   // → ANTHROPIC_MODEL
+    "provider": "anthropic",                         // anthropic | bedrock | vertex
+    "base_url": "",                                  // gateway / self-hosted endpoint URL
+    "pass_env": []                                   // host env var names to forward (credentials)
+  },
+  "prompt": {
+    "file": ""                                       // run headless on this file, then exit
+  },
   "profile": {
-    "default_mode":  "clean",                        // clean | remember | profile
-    "name":          "api-work",                     // profile mode: which named profile (else --profile)
-    "memory_store":  "default",                      // remember mode: which store (else --remember <store>)
-    "keep":          false,                           // clean mode: retain the profile (like --keep)
+    "mode":          "clean",                        // clean | remember | profile
+    "name":          "api-work",                     // profile mode: which named profile
+    "memory_store":  "default",                      // remember mode: which store
+    "keep":          false,                           // clean mode: retain the profile
     "profiles_root": "~/.agentdev/profiles",
-    "clean_root":    "~/.cache/agentdev/clean",      // tmpfs-friendly (Phase 2)
+    "clean_root":    "~/.cache/agentdev/clean",
     "memory_root":   "~/.agentdev/memory"
   },
   "template": {
-    "source":   "~/.agentdev/templates/default",
-    "strategy": "copy",                              // overlay-ro is Phase 2
-    "include":  ["CLAUDE.md", "settings.json", "hooks", "skills", ".mcp.json"]
+    "source":  "~/.agentdev/templates/default",
+    "include": ["CLAUDE.md", "settings.json", "hooks", "skills", ".mcp.json"]
   },
   "auth": {
     "mode": "auto"                                   // auto | api-key-env | interactive | inherit-credentials
   },
   "workspace": {
-    "isolation": "mount",                            // cow | patch-only are Phase 2
-    "trust":     "skip-permissions",                 // skip-permissions | workspace-only | prompt
-    "workdir":   "services/api"                      // ENTRY FOLDER: the shell's cwd; relative to the
+    "source":  ".",                                  // host folder mounted at /<basename>; default = the config dir
+    "trust":   "skip-permissions",                   // skip-permissions | workspace-only | prompt
+    "workdir": "services/api"                        // ENTRY FOLDER: the shell's cwd; relative to the
                                                      //   workspace, or absolute; empty/"." = workspace root
   },
   "network": {
-    "mode": "off",                                   // off | allowlist | none
+    "mode": "off",                                   // off | none | allowlist
     "log":  false,
     "mitm": false,
     "allow": ["api.anthropic.com"]
@@ -318,17 +326,30 @@ External mounts (the configs' `mounts.read_only`/`mounts.read_write` maps, `-ro`
   "mounts": {
     "workspace":  "rw",                              // rw | ro (the workspace mount mode)
     "confirm_rw": false,                             // prompt before every read-write mount
-    "rw_allow":   ["~/out/shared"],                  // pre-approve rw mounts under confirm_rw
+    "rw_allow":   ["~/out/shared"],                  // pre-approve rw sources under confirm_rw
     "read_only":  { "~/ref/standards": "/external/standards" },
-    "read_write": { "~/out/shared":    "/external/shared" }
+    "read_write": { "~/out/shared":    "/external/shared" },
+    "devices":    []                                 // host device nodes to pass through
   },
   "sandbox": {
-    "ssh": true                                      // mount host SSH keys / agent
+    "ssh":     true,                                 // host SSH keys + agent
+    "usb":     true,                                 // /dev/bus/usb
+    "host_ca": true                                  // host extra TLS anchors
   }
 }
 ```
 
-### 5.1 The entry folder (`workspace.workdir` / `--workdir`)
+### 5.0 Model selection (`model.*`, `lib/model.sh`)
+
+`model.id` → `ANTHROPIC_MODEL`. `model.provider` sets `anthropic` (default), `bedrock`
+(`CLAUDE_CODE_USE_BEDROCK=1`), or `vertex` (`CLAUDE_CODE_USE_VERTEX=1`). `model.base_url`
+sets the matching `ANTHROPIC_*_BASE_URL`. `model.pass_env` forwards host variables **by
+name** (so secrets never appear in argv or `--dry-run`). agentdev derives the endpoint host
+(the provider default, or the host of `base_url`); under `network.mode: "allowlist"` that
+endpoint must be allowed (checked with the proxy's own rules via `lib/allowcheck.py`) or the
+launch aborts.
+
+### 5.1 The entry folder (`workspace.workdir`)
 
 The workspace always mounts at `/<dir>`. The entry folder is where the container's shell
 (`bash`) starts — its working directory. This makes a **folder per working context** natural:
@@ -336,12 +357,28 @@ keep an `agentdev-config.json` and a `.envrc` in that folder, and launch the age
 up already inside it with its environment loaded.
 
 - Resolution: empty or `"."` → the workspace root `/<dir>`; a relative path → under the
-  workspace (`/<dir>/<path>`); an absolute path → used verbatim. `--workdir` wins over config.
+  workspace (`/<dir>/<path>`); an absolute path → used verbatim.
 - When the target resolves inside the workspace mount, its **host** path is checked before
   launch, so a typo fails fast rather than dropping the shell somewhere unexpected.
 - The launcher passes `-w <workdir>` and `-e AGENTDEV_WORKDIR=<workdir>`; the image's
   `/etc/bash.bashrc` `cd`s there (falling back to `$WORKSPACE`) and runs the `direnv` hook,
   so a `.envrc` in the folder is picked up (`direnv allow` once per store).
+
+### 5.2 Network (`network.*`, `lib/net.sh`, `image/proxy.py`)
+
+| `network.mode` | Mechanism | Reach |
+|---|---|---|
+| `off` (default) | No network args; podman default networking | Full internet |
+| `none` | `--network none` | Nothing |
+| `allowlist` | Agent joins an `--internal` podman network. A proxy sidecar from the same image joins it and a normal network. `HTTP(S)_PROXY` points the agent at the proxy. | Only `network.allow` entries, HTTP(S) only |
+
+- Rules: `host`, `host:port`, `*.host`, `host/path`. Path rules need `network.mitm: true`
+  for HTTPS, which terminates TLS with a per-run CA generated by host `openssl`.
+- `network.log: true` writes `<profile>/agentdev-egress.log`, a plain tab-separated file
+  you read with ordinary tools (there is no `report` subcommand).
+- An empty allowlist is an error, and the model endpoint (§5.0) must be allowed.
+- The networks and sidecar are removed by the EXIT trap.
+- SSH/USB/CA passthrough (`sandbox.*`) is independent of `network.mode`.
 
 ---
 
@@ -401,7 +438,7 @@ committed or pushed (VISION N6). It is inert in a folder you never put under git
 
 ### Seeded `.claude.json` (minimal, believable, clean)
 
-The sharpest open question (VISION Q1). Phase 1 seeds the **smallest valid** object that
+The sharpest open question (VISION §13). agentdev seeds the **smallest valid** object that
 (a) presents as a brand-new install and (b) sets per-project trust per `--trust`:
 
 ```json
@@ -461,9 +498,8 @@ Mechanism:
 
 Properties: the store is its own plain folder under `memory_root/<name>`, shareable across
 repos; agentdev does not version it (put it under git yourself if you want memory history).
-A store may be mounted `:ro` for read-only team memory (Phase 2 layering of a writable store
-on top). `--clean` *without*
-`--remember` mounts **no** memory layer — clean stays clean.
+`profile.mode: clean` with no memory store configured mounts **no** memory layer — clean
+stays clean; `remember` is "amnesiac about conversations, but keeps what it learned."
 
 ---
 
@@ -475,7 +511,7 @@ on top). `--clean` *without*
 | Seed? | always | always | only if absent |
 | Memory mount | none | `memory_root/<store>` overlay | in-profile (persists naturally) |
 | Lock | n/a (unique run-id) | n/a | `flock` — refuse 2nd concurrent launch |
-| Cleanup on exit | `rm -rf` unless `--keep` | `rm -rf` home; keep store | keep |
+| Cleanup on exit | `rm -rf` unless `profile.keep` | `rm -rf` home; keep store | keep |
 
 **Clean-mode guarantees** (VISION §5) are enforced structurally: a fresh `clean_root`
 dir with no `projects/*/*.jsonl`, no `memory/`, an empty `history.jsonl`, a fresh
@@ -495,11 +531,13 @@ resolving at launch to one of the concrete modes below:
    **inherit-credentials**.
 3. else → **interactive**.
 
-The resolution is printed (`Auth: auto -> <mode>`). `--auth <mode>` / `--login` force a
-specific mode.
+The resolution is printed (`Auth: auto -> <mode>`). `auth.mode` in the config forces a
+specific mode. A non-Anthropic `model.provider` resolves to **provider-env** (credentials
+via `model.pass_env`; `auth.mode` must be `auto`).
 
-- **api-key-env.** Forward `ANTHROPIC_API_KEY` into the container (`-e ANTHROPIC_API_KEY=…`)
-  and seed no `.credentials.json`; fail-closed if the key is unset.
+- **api-key-env.** Forward `ANTHROPIC_API_KEY` into the container **by name** (`-e
+  ANTHROPIC_API_KEY`, so the value never appears in argv or `--dry-run`) and seed no
+  `.credentials.json`; fail-closed if the key is unset.
 - **inherit-credentials** (named profiles only). Copy the host's subscription
   `~/.claude/.credentials.json` into the profile once, mode `600`, gitignored — **and**
   merge the host's claude.ai account linkage (`oauthAccount`, `hasAvailableSubscription`,
@@ -519,48 +557,57 @@ specific mode.
 The key is only forwarded when the effective mode is `api-key-env`, so a stray
 `ANTHROPIC_API_KEY` never leaks into an inherit/interactive run.
 
-**Trust.** Default `skip-permissions`: when launching `claude`, pass
-`--dangerously-skip-permissions`. `workspace-only` instead pre-seeds trust for exactly the
-workspace path in `.claude.json` (§6) and skips the dangerous flag — the clean-room-minimal
-choice. `prompt` seeds nothing and lets the trust dialog appear.
+**Trust.** `workspace.trust` only affects seeding. `workspace-only` pre-seeds trust for
+exactly the workspace path in `.claude.json` (§6). `skip-permissions` and `prompt` both
+seed nothing, so they produce identical profiles. agentdev never adds
+`--dangerously-skip-permissions` to an interactive `claude`. The user runs `claude`
+or `clauded` in the shell. A `--prompt`/`prompt.file` run always passes
+`--dangerously-skip-permissions`, regardless of `workspace.trust`. The value is validated
+against its enum by the schema.
 
 ---
 
-## 10. The agent abstraction (why Phase 1 doesn't paint us in)
+## 10. The agent abstraction (why Claude-only doesn't paint us in)
 
-Phase 1 is Claude Code only, but the seams for other agents are already placed, at **zero
-Phase-1 cost**:
+Only Claude Code is wired today, but the seams for other agents are placed at low cost:
 
-- `[agent].name` exists and is read (only `claude` is valid now).
-- The profile is defined as *"the home dir(s) for this agent"*; for `claude` that's
-  `.claude/` + `.claude.json`. Adding an agent is: (a) its `include` list, (b) its home
-  path(s), (c) its memory path convention, (d) its auth env var. Nothing in the mount
-  plan, seeding skeleton, folder lifecycle, or CLI changes shape.
-- `PROFILE_MOUNT` is built from a small per-agent table rather than hardcoded, so Phase 3
-  swaps `.claude`→`.opencode`/`.pi`/`.omp`/`.kit` without touching the launcher body. The
-  image may need per-agent CLIs installed; `[agent].image` lets each agent pin its own.
+- `agent.name` is validated to `claude` by the schema and recorded in
+  `agentdev.meta.json`. Admitting another agent is a schema change plus a per-agent table.
+- The profile is *"the home dir(s) for this agent"*; for `claude` that's `.claude/` +
+  `.claude.json`. Adding an agent is: (a) its `include` list, (b) its home path(s), (c) its
+  memory path convention, (d) its auth env, (e) its headless prompt command, (f) its model
+  env. Nothing in the mount plan, seeding skeleton, folder lifecycle, or CLI changes shape.
+- **Not done yet:** `PROFILE_MOUNT` is hardcoded to `.claude` + `.claude.json`
+  (`agentdev` `launch()`), and the `--prompt` command is hardcoded to `claude`. The
+  intended per-agent table has not been built. The image already ships `opencode` and
+  `omp` as tools, but agentdev does not manage their homes. Model selection (§5.0) is
+  Claude-specific (the `ANTHROPIC_*` / `CLAUDE_CODE_*` env vars).
 
-This is the single most important design constraint on Phase 1: **implement Claude
-concretely, but never behind an interface the next agent would have to break.**
+The design constraint: **implement Claude concretely, but never behind an interface the
+next agent would have to break.**
 
 ---
 
-## 11. Phase 1 scope boundary
+## 11. Scope boundary
 
-**In:** the self-contained image (`Containerfile` + `entrypoint.sh`) and `agentdev build`;
-our own `lib/mounts.sh` (union grammar, collisions, CA, SSH, `init`); clean / remember /
-named modes; `copy` seeding with linting; plain-folder profiles & memory stores (`fork`,
-`gc`, `rm` — no version control; versioning is left entirely to the user, outside the tool);
-a `.gitignore` secrets guard; `auto` auth detection (api-key-env / inherit-credentials /
-interactive); trust seeding; `profiles`/`memory`/`doctor`/`init`/`--dry-run`; `flock`
-concurrency guard; `meta.json`/`lock`.
+**In:** the self-contained image (`Containerfile` + `entrypoint.sh`, built with
+`make build`); the single, strict, fail-closed config file (`-c` / `$AGENTDEV_CONFIG` /
+`./agentdev-config.json`); the minimal CLI (`--dry-run`, `-c`, `--prompt`, `-- command`);
+clean / remember / named modes; model selection (id / provider / base_url / forwarded
+credentials, with the allowlist interlock); `copy` seeding with linting; plain-folder
+profiles & memory stores (managed with ordinary tools — no subcommands, no version control;
+a `.gitignore` secrets guard is the only concession); `auto` / api-key-env /
+inherit-credentials / interactive auth; trust seeding; network `off` / `none` / `allowlist`
+with egress logging and an optional MITM tier; the `flock` + live-container + fixed-name
+concurrency guard; `meta.json` / `lock`.
 
-**Deferred (Phase 2):** `--net=allowlist` + egress logging; `--cow-workspace` /
-`--patch-only`; tmpfs clean rooms; `report` (cost/cache/tools) + `--budget`; `overlay-ro`
-templates; read-only/layered team memory.
+**Deliberately out of scope** (cut, not deferred — ordinary files, git, and a shell cover
+them): workspace copy-on-write / patch-review, `overlay-ro` / composable templates, fleet /
+best-of-N / fan-out, cost accounting, and any profile/memory/report/doctor/init/build
+subcommand.
 
-**Deferred (Phase 3):** `--fan-out` fleet/best-of-N; composable template layers;
-multi-agent (`--agent`, generalized home-path table, per-agent image install).
+**Next:** other agents (generalize the per-agent table above). The config, mount plan,
+seeding, and lifecycle are already agent-shaped.
 
 ---
 
@@ -570,14 +617,14 @@ multi-agent (`--agent`, generalized home-path table, per-agent image install).
    CLI, pinned by version; decide whether to bake a known-good CLI version into the image
    or install at build from a pinned npm tag (lock records whichever resolves).
 2. **Exact `.claude.json` seed field set** for 2.1.300 — pin in `templates/default` and add
-   a `doctor` check that warns when the installed CLI's schema has moved. (VISION Q1.)
+   a check that warns when the installed CLI's schema has moved. (VISION §13.)
 3. **`<ENC>` assertion** — compute and assert at launch; decide the failure message when a
    future CLI changes the encoding.
 4. **Folder provenance without version control** — agentdev does not version folders; is
    `agentdev.meta.json` + `agentdev.lock` enough provenance, or do we want a lightweight
    append-only run log (not git) for named profiles?
-5. **Launching claude vs. bash** — keep bash default and rely on `-- claude …` for
-   automation, or add a `--exec claude` convenience with trust flags wired in automatically?
+5. **Launching claude vs. bash** — partly settled: `--prompt <file>` launches the agent
+   headless. Interactive runs still open `bash`. Open: should the config choose this?
 6. **Lint strictness** — how hard to fail on a template whose `settings.json` is valid JSON
    but schema-unknown to the installed CLI.
 

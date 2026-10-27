@@ -1,6 +1,7 @@
 #!/bin/bash
-# profile.sh - resolve, lock, and manage profiles. A profile is a plain folder;
-# agentdev never versions it (run git yourself if you want history).
+# profile.sh - resolve and lock a named profile for a launch. A profile is a plain
+# folder; agentdev never versions it and offers no management subcommands — manage
+# the folders yourself (cp to fork, rm to delete, tar to move, git to version).
 # Requires: flock; globals PROFILES_ROOT, CLEAN_ROOT, SELFDIR.
 
 # new_run_id - a sortable, unique run identifier.
@@ -40,62 +41,8 @@ assert_profile_free() {
   if [[ -n "$cid" ]]; then
     echo "Error: profile folder is in use by a running container: $path" >&2
     echo "       container: $cid" >&2
-    echo "       If that run is orphaned (no launcher attached), reap it with:" >&2
-    echo "         agentdev profiles gc" >&2
+    echo "       If that run is orphaned (no launcher attached), remove it with:" >&2
+    echo "         podman rm -f $cid" >&2
     exit 1
   fi
-}
-
-# cmd_profiles - the `agentdev profiles …` subcommand surface.
-cmd_profiles() {
-  local sub="${1:-ls}"; shift || true
-  case "$sub" in
-    ls)
-      [[ -d "$PROFILES_ROOT" ]] || { echo "(no profiles)"; return 0; }
-      find "$PROFILES_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort ;;
-    show)
-      local p="$PROFILES_ROOT/${1:?usage: profiles show <name>}"
-      [[ -f "$p/agentdev.meta.json" ]] && cat "$p/agentdev.meta.json" || echo "no such profile: $1" >&2 ;;
-    new)
-      # Create and seed a named profile without launching.
-      MODE="profile"; RUN_ID=$(new_run_id)
-      PROFILE="$PROFILES_ROOT/${1:?usage: profiles new <name>}"
-      [[ -d "$PROFILE" ]] && { echo "profile already exists: $1" >&2; return 1; }
-      compute_enc "$DIR_NAME"
-      seed_profile; write_meta; write_lock
-      echo "Created profile: $PROFILE" ;;
-    rm)
-      rm -rf "${PROFILES_ROOT:?}/${1:?usage: profiles rm <name>}"; echo "removed profile: $1" ;;
-    fork)
-      local src="$PROFILES_ROOT/${1:?usage: profiles fork <src> <dst>}"
-      local dst="$PROFILES_ROOT/${2:?usage: profiles fork <src> <dst>}"
-      [[ -d "$src" ]] || { echo "no such profile: $1" >&2; return 1; }
-      [[ -d "$dst" ]] && { echo "destination exists: $2" >&2; return 1; }
-      cp -a "$src" "$dst"; echo "forked $1 -> $2" ;;
-    gc)
-      # Sweep crashed clean-room leftovers.
-      if [[ -d "$CLEAN_ROOT" ]]; then
-        local n; n=$(find "$CLEAN_ROOT" -mindepth 1 -maxdepth 1 -type d | wc -l)
-        rm -rf "${CLEAN_ROOT:?}"/*; echo "gc: swept $n clean-room leftover(s)"
-      else
-        echo "gc: nothing to sweep"
-      fi
-      # Reap orphaned profile containers. A container is orphaned when no launcher
-      # holds its profile's lock: we can take the lock iff the launcher is gone, so
-      # flock itself distinguishes orphaned (reap) from active (leave running). The
-      # rm runs while we hold the lock, so a fresh launch can't race in behind it.
-      local cid ppath
-      while read -r cid ppath; do
-        [[ -n "$cid" && -n "$ppath" ]] || continue
-        if flock -n "$ppath/.agentdev.lock-file" -c "podman rm -f '$cid' >/dev/null 2>&1"; then
-          echo "gc: reaped orphaned profile container $cid ($ppath)"
-        else
-          echo "gc: profile container $cid ($ppath) is active; left running" >&2
-        fi
-      done < <(podman ps -a --filter 'label=agentdev.profile' \
-                 --format '{{.ID}} {{index .Labels "agentdev.profile"}}' 2>/dev/null)
-      # Reap egress proxy sidecars and networks left by crashed allowlist runs.
-      gc_networks ;;
-    *) echo "Usage: agentdev profiles ls|show|new|rm|fork|gc [args]" >&2; return 1 ;;
-  esac
 }

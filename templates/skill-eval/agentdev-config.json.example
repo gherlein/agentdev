@@ -1,9 +1,8 @@
 {
   "//": "Example agentdev config for a skill-evaluation harness directory. Copy to",
-  "//1": "./agentdev-config.json in the directory you launch the eval from. `agentdev",
-  "//2": "--eval` sets equivalent defaults; this spells them out and lets you tune the",
-  "//3": "allowlist. (JSON has no comments; the // keys are ignored by agentdev.)",
-
+  "//1": "./agentdev-config.json in the directory you launch the eval from. It locks the",
+  "//2": "run down: allowlist network, read-only workspace, confirmed rw mounts, api-key",
+  "//3": "auth, no SSH or USB. Keys starting with // are comments and are ignored.",
   "template": {
     "source": "~/src/agentdev/templates/skill-eval"
   },
@@ -15,7 +14,9 @@
   },
   "network": {
     "mode": "allowlist",
-    "allow": ["api.anthropic.com"],
+    "allow": [
+      "api.anthropic.com"
+    ],
     "log": true
   },
   "mounts": {
@@ -23,6 +24,7 @@
     "confirm_rw": true
   },
   "sandbox": {
-    "ssh": false
+    "ssh": false,
+    "usb": false
   }
 }

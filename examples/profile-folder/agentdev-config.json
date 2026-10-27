@@ -4,7 +4,7 @@
     "image": "ghcr.io/gherlein/agentdev:latest"
   },
   "profile": {
-    "default_mode": "profile",
+    "mode": "profile",
     "name": "example",
     "keep": false
   },
@@ -23,6 +23,8 @@
     "confirm_rw": false
   },
   "sandbox": {
-    "ssh": true
+    "ssh": true,
+    "usb": true,
+    "host_ca": true
   }
 }

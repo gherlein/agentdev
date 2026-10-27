@@ -2,11 +2,12 @@
 # orchestrate.sh — a minimal "master" that fans out one-shot agentdev runs and
 # collects each result as a file.
 #
-# Model (see ../../docs/managing-context-and-memory.md and DESIGN.md §2.5):
+# Model (see ../../docs/managing-context-and-memory.md):
 #   - ONE clean agentdev container per task — each gets its own throwaway home,
 #     takes no profile lock, and so runs fully concurrently;
-#   - data comes back through a per-run CHANNEL dir bind-mounted via `-rw`, which
-#     lands at /external/<run> inside the container;
+#   - each worker is driven by a generated per-run config file; data comes back
+#     through a per-run CHANNEL dir bind-mounted read-write (mounts.read_write) at
+#     /external/<run> inside the container;
 #   - the COMPLETION SIGNAL is the child process exiting: agentdev runs `podman
 #     run --rm` in the foreground, so the launcher (our child) lives exactly as
 #     long as the container. When `wait` returns, we read out/result.txt.
@@ -46,16 +47,26 @@ declare -A RUN_OF        # pid -> run id
 LAST_PID=""
 
 launch_one() {           # launch_one <n> <task> ; sets LAST_PID
-  local n="$1" task="$2" run="w$1" dir
+  local n="$1" task="$2" run="w$1" dir cfg
   dir="$CHANNEL_ROOT/$run"
   mkdir -p "$dir/in" "$dir/out" "$dir/bin"
   cp "$SELF_DIR/worker.sh" "$dir/bin/worker.sh"
   printf '%s' "$task" > "$dir/in/task.txt"
-  # `-rw $dir` → /external/$run in the container (agentdev's basename rule).
+  # Generate this worker's config: a clean container, api-key auth, the shared
+  # workspace, and the channel dir bind-mounted read-write at /external/<run>.
+  cfg="$dir/agentdev-config.json"
+  python3 - "$cfg" "$WORKSPACE" "$dir" "/external/$run" "$AUTH" <<'PY'
+import json, sys
+cfg, ws, chan, dest, auth = sys.argv[1:6]
+json.dump({
+    "profile":   {"mode": "clean"},
+    "auth":      {"mode": auth},
+    "workspace": {"source": ws},
+    "mounts":    {"read_write": {chan: dest}},
+}, open(cfg, "w"))
+PY
   (
-    cd "$WORKSPACE"
-    exec "$AGENTDEV" --clean --auth "$AUTH" -rw "$dir" \
-         -- bash "/external/$run/bin/worker.sh"
+    exec "$AGENTDEV" -c "$cfg" -- bash "/external/$run/bin/worker.sh"
   ) > "$dir/out/agentdev.log" 2>&1 &
   LAST_PID=$!
   RUN_OF[$LAST_PID]="$run"

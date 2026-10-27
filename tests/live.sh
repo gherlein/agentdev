@@ -32,72 +32,87 @@ timeout 8 bash -c 'exec 3<>/dev/tcp/example.com/443' 2>/dev/null && HAVE_NET=yes
 # --- throwaway fixtures ----------------------------------------------------
 # NB: we deliberately do NOT override $HOME. Rootless podman keeps its image
 # store under $HOME, so a throwaway HOME would hide the locally-built image and
-# force a (failing) pull. We isolate only AGENTDEV_HOME, the profile roots, and
+# force a (failing) pull. The per-case config isolates the profile roots and
 # the workspace. Live cases use api-key-env, so no host-credential fixtures are
 # needed; the agent's home is still the (tmp) profile, never your real ~/.claude.
 ROOT="$(mktemp -d /tmp/agentdev-live.XXXX)"
 trap 'podman ps -a --filter label=agentdev.proxy -q 2>/dev/null | xargs -r podman rm -f >/dev/null 2>&1; rm -rf "$ROOT"' EXIT
-AH="$ROOT/agentdev-home"; WS="$ROOT/ws"; OUT="$ROOT/out"
-mkdir -p "$AH" "$WS" "$OUT"
-cat > "$AH/config.json" <<EOF
-{
-  "profile": { "profiles_root": "$ROOT/profiles", "clean_root": "$ROOT/clean", "memory_root": "$ROOT/memory" },
-  "template": { "source": "$REPO/templates/default" },
-  "network": { "allow": ["example.com"] }
-}
-EOF
+WS="$ROOT/ws"; OUT="$ROOT/out"
+mkdir -p "$WS" "$OUT"
 
-# adev ARGS... - run the launcher with an isolated AGENTDEV_HOME, from the
-# workspace, with api-key auth. $HOME is left intact (podman image store).
-adev() { ( cd "$WS" && AGENTDEV_HOME="$AH" ANTHROPIC_API_KEY=dummy \
-           timeout "$RUN_TIMEOUT" "$AD" "$@" ) 2>&1; }
+# adev EXTRA_JSON ARGS... - write a config (EXTRA_JSON deep-merged over a base that
+# keeps every root inside $ROOT and mounts $WS as the workspace), then run the
+# launcher with it and api-key auth. $HOME is left intact (podman image store).
+adev() {
+  local extra="$1"; shift
+  python3 - "$ROOT/config.json" "$extra" "$ROOT" "$REPO" "$WS" <<'PY'
+import json, sys
+path, extra, root, repo, ws = sys.argv[1:6]
+base = {
+    "profile": {"profiles_root": f"{root}/profiles", "clean_root": f"{root}/clean",
+                "memory_root": f"{root}/memory"},
+    "template": {"source": f"{repo}/templates/default"},
+    "auth": {"mode": "api-key-env"},
+    "workspace": {"source": ws},
+}
+def merge(a, b):
+    for k, v in b.items():
+        a[k] = merge(a.get(k, {}), v) if isinstance(v, dict) and isinstance(a.get(k), dict) else v
+    return a
+with open(path, "w") as fh:
+    json.dump(merge(base, json.loads(extra)), fh)
+PY
+  ( ANTHROPIC_API_KEY=dummy timeout "$RUN_TIMEOUT" "$AD" -c "$ROOT/config.json" "$@" ) 2>&1
+}
 
 echo "== Tier B: live enforcement (image: $IMAGE) =="
 
 echo "workspace isolation:"
-out=$(adev --clean --workspace-ro -- bash -lc 'touch /ws/x 2>/dev/null && echo WRITABLE || echo READONLY')
+out=$(adev '{"mounts":{"workspace":"ro"}}' -- bash -lc 'touch /ws/x 2>/dev/null && echo WRITABLE || echo READONLY')
 grep -q READONLY <<<"$out" && ok "ro workspace blocks writes" || bad "ro workspace blocks writes" "$out"
-out=$(adev --clean -- bash -lc 'touch /ws/x 2>/dev/null && echo WRITABLE || echo READONLY')
+out=$(adev '{}' -- bash -lc 'touch /ws/x 2>/dev/null && echo WRITABLE || echo READONLY')
 grep -q WRITABLE <<<"$out" && ok "rw workspace allows writes (control)" || bad "rw workspace allows writes" "$out"
 
 echo "ssh suppression:"
-out=$(adev --clean --no-ssh -- bash -lc 'test -e /home/developer/.ssh && echo SSH || echo NOSSH')
-grep -q NOSSH <<<"$out" && ok "--no-ssh omits host ssh" || bad "--no-ssh omits host ssh" "$out"
+out=$(adev '{"sandbox":{"ssh":false}}' -- bash -lc 'test -e /home/developer/.ssh && echo SSH || echo NOSSH')
+grep -q NOSSH <<<"$out" && ok "sandbox.ssh=false omits host ssh" || bad "sandbox.ssh=false omits host ssh" "$out"
 
 echo "confirm-rw (fail-closed, no TTY):"
 # No TTY + unapproved rw mount ⇒ the mount is refused (absent inside); the run
 # continues without it (only a declined *workspace* rw aborts the run).
-out=$(adev --clean --workspace-ro --confirm-rw -rw "$OUT" -- bash -lc 'test -e /external/out && echo MOUNT_PRESENT || echo MOUNT_ABSENT')
+out=$(adev "{\"mounts\":{\"workspace\":\"ro\",\"confirm_rw\":true,\"read_write\":{\"$OUT\":\"/external/out\"}}}" -- bash -lc 'test -e /external/out && echo MOUNT_PRESENT || echo MOUNT_ABSENT')
 if grep -q MOUNT_ABSENT <<<"$out" && grep -qiE 'denied|refusing' <<<"$out"; then
   ok "confirm-rw denies unapproved rw with no TTY"
 else bad "confirm-rw denies unapproved rw with no TTY" "$out"; fi
-out=$(adev --clean --workspace-ro --confirm-rw --rw-allow "$OUT" -rw "$OUT" -- bash -lc 'test -w /external/out && echo RW_OK || echo RW_NO')
-grep -q RW_OK <<<"$out" && ok "--rw-allow pre-approves the rw mount" || bad "--rw-allow pre-approves the rw mount" "$out"
+out=$(adev "{\"mounts\":{\"workspace\":\"ro\",\"confirm_rw\":true,\"rw_allow\":[\"$OUT\"],\"read_write\":{\"$OUT\":\"/external/out\"}}}" -- bash -lc 'test -w /external/out && echo RW_OK || echo RW_NO')
+grep -q RW_OK <<<"$out" && ok "rw_allow pre-approves the rw mount" || bad "rw_allow pre-approves the rw mount" "$out"
 
 echo "skills visibility (profile .claude/skills is mounted):"
-adev profiles new evalp >/dev/null 2>&1
+# A profile is seeded on first launch (no `profiles new`); seed it with a no-op run,
+# then drop a skill into the plain folder and check the next run sees it.
+adev '{"profile":{"mode":"profile","name":"evalp"}}' -- true >/dev/null 2>&1
 mkdir -p "$ROOT/profiles/evalp/.claude/skills/demo"
 printf -- '---\nname: demo\n---\nbody\n' > "$ROOT/profiles/evalp/.claude/skills/demo/SKILL.md"
-out=$(adev --profile evalp -- bash -lc 'test -f /home/developer/.claude/skills/demo/SKILL.md && echo SKILL_OK || echo SKILL_NO')
+out=$(adev '{"profile":{"mode":"profile","name":"evalp"}}' -- bash -lc 'test -f /home/developer/.claude/skills/demo/SKILL.md && echo SKILL_OK || echo SKILL_NO')
 grep -q SKILL_OK <<<"$out" && ok "provisioned skill visible inside" || bad "provisioned skill visible inside" "$out"
 
 echo "single-instance guard:"
-( cd "$WS" && AGENTDEV_HOME="$AH" ANTHROPIC_API_KEY=dummy "$AD" --profile lockp -- bash -lc 'sleep 20' ) >/dev/null 2>&1 &
+adev '{"profile":{"mode":"profile","name":"lockp"}}' -- bash -lc 'sleep 20' >/dev/null 2>&1 &
 BGPID=$!
 sleep 6   # let the first run acquire the lock + start its container
-out=$(adev --profile lockp -- bash -lc 'echo SECOND_RAN')
+out=$(adev '{"profile":{"mode":"profile","name":"lockp"}}' -- bash -lc 'echo SECOND_RAN')
 if grep -q SECOND_RAN <<<"$out"; then bad "second run on same profile refused" "$out"
 else grep -qi 'in use' <<<"$out" && ok "second run on same profile refused" || bad "second run refused (wrong message)" "$out"; fi
 kill "$BGPID" 2>/dev/null; wait "$BGPID" 2>/dev/null
-adev profiles gc >/dev/null 2>&1
+# The EXIT trap reaps any container this run left (profile/proxy labelled).
 
 if [[ "$HAVE_NET" == yes ]]; then
   echo "network isolation:"
-  out=$(adev --clean --net=none -- bash -lc 'curl -sS -m 8 https://example.com >/dev/null 2>&1 && echo NET_OK || echo NET_BLOCKED')
-  grep -q NET_BLOCKED <<<"$out" && ok "--net=none blocks egress" || bad "--net=none blocks egress" "$out"
+  out=$(adev '{"network":{"mode":"none"}}' -- bash -lc 'curl -sS -m 8 https://example.com >/dev/null 2>&1 && echo NET_OK || echo NET_BLOCKED')
+  grep -q NET_BLOCKED <<<"$out" && ok "network none blocks egress" || bad "network none blocks egress" "$out"
 
   echo "network allowlist (proxy sidecar):"
-  out=$(adev --clean --net=allowlist -- bash -lc '
+  out=$(adev '{"network":{"mode":"allowlist","allow":["example.com","api.anthropic.com"]}}' -- bash -lc '
     curl -sS -m 12 https://example.com >/dev/null 2>&1 && echo ALLOWED_OK || echo ALLOWED_FAIL
     curl -sS -m 12 https://www.wikipedia.org >/dev/null 2>&1 && echo DENIED_REACHED || echo DENIED_BLOCKED')
   # The security-critical property: a non-allowlisted host is blocked (hard).

@@ -36,15 +36,14 @@ agentdev --dry-run            # note the "entry folder:" line and -w / AGENTDEV_
 
 ## What the config does
 
-- **`profile.default_mode: "profile"` + `profile.name: "example"`** — a persistent named
+- **`profile.mode: "profile"` + `profile.name: "example"`** — a persistent named
   profile, so the agent's home (config, history, memory) survives across runs. No `--profile`
   flag needed; it comes from the file.
 - **`workspace.workdir: "."`** — the **entry folder**. The agent's shell starts in this
   folder (here, the workspace root). Set it to a subpath like `"services/api"` to drop the
-  agent straight into a subdirectory; `--workdir <path>` overrides it for a single run.
+  agent straight into a subdirectory.
 - **`.envrc`** — the image ships `direnv` and runs its hook, so this file is loaded when the
   shell starts here. Run `direnv allow` once inside the container to trust it.
 
-Every key maps to a CLI flag; the CLI always wins, so `agentdev --clean` or
-`agentdev --workdir services/api` overrides the file for one run. See `DESIGN.md` §5 for the
-full schema.
+Everything is in this one file; there are no launch flags but `-c`, `--dry-run`, and
+`--prompt`. See [`../../docs/user-guide.md`](../../docs/user-guide.md) §19 for the full schema.

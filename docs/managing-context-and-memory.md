@@ -322,13 +322,13 @@ memory lands where the CLI expects it.
 |---|---|---|---|
 | **clean** (default) | seeded fresh, discarded | none — throwaway home | Zero inherited memory; cheapest, most reproducible |
 | **remember** | fresh home, discarded | **persistent memory store** mounted at `.claude/projects/<ENC>/memory` | Keeps learned memory across runs while history stays clean |
-| **profile** `--profile <name>` | seeded once, then drifts | persistent (kept in the folder) | A durable identity; its `CLAUDE.md`/memory/MCP accumulate over time |
+| **profile** (`profile.mode: "profile"`, `profile.name`) | seeded once, then drifts | persistent (kept in the folder) | A durable identity; its `CLAUDE.md`/memory/MCP accumulate over time |
 
 The important connection: in **remember** mode, the folder agentdev mounts *is*
-the auto-memory directory from §2.2. So "agentdev memory stores" and Claude Code's
+the auto-memory directory from §2.2. So the agentdev memory store and Claude Code's
 own auto memory are the same mechanism — agentdev just makes the store a named,
-swappable, host-side folder you can keep, fork, or discard independently of the
-throwaway home.
+swappable, host-side folder (under `profile.memory_root`) you can keep, fork, or
+discard independently of the throwaway home.
 
 ### 3.3 Practical guidance for agentdev profiles
 

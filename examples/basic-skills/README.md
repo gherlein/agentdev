@@ -31,7 +31,7 @@ ask the agent to "run the tests" or "review my diff" and it will use them.
 
 ## What the config does
 
-- **`profile.default_mode: "profile"` + `profile.name: "basic-skills"`** — a persistent
+- **`profile.mode: "profile"` + `profile.name: "basic-skills"`** — a persistent
   named profile, so history, memory, and these skills survive across runs.
 - **`template.source: "./template"` + `template.include: ["CLAUDE.md", "settings.json", "skills"]`**
   — seeds the CLAUDE.md, settings, and the whole `skills/` directory from the bundled

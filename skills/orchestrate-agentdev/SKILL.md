@@ -27,24 +27,30 @@ Launching workers **spawns containers and spends tokens**. Always:
 
 ## The primitive — one worker, one task
 
+Everything is in a config file (there are no launch flags but `-c`, `--dry-run`,
+and `--prompt`). The cleanest unattended worker writes the task to a file and runs
+it with `--prompt`, which handles stdin and skip-permissions for you:
+
 ```bash
-answer=$(agentdev --clean --auth api-key-env -- \
-  claude --dangerously-skip-permissions -p "<the task>")
+cat > worker.json <<'EOF'
+{ "profile": {"mode": "clean"}, "auth": {"mode": "api-key-env"},
+  "workspace": {"source": "/path/to/repo"} }
+EOF
+echo "<the task>" > task.md
+answer=$(agentdev -c worker.json --prompt task.md)
 ```
 
-Four things are mandatory for an **unattended** worker (each fails silently or
+Three things are mandatory for an **unattended** worker (each fails silently or
 hangs if omitted):
 
-- `--auth api-key-env` with `ANTHROPIC_API_KEY` set — headless `claude -p` cannot
-  do an interactive login, and clean mode does not inherit a subscription. This
-  also keeps account-level claude.ai connectors from leaking into the worker.
-- `--dangerously-skip-permissions` **on the `claude` command itself** — otherwise
-  the worker stalls on tool-approval prompts. The image's `clauded` alias does
-  NOT apply to a directly-exec'd `-- claude …`.
-- The task rides in the `-p` prompt. For long/multi-line tasks, write it to a
-  file in a mounted dir and have the command read it (see the channel below).
-- The worker runs with the current directory as its workspace; `cd` to the repo
-  the task is about, or mount it.
+- `auth.mode: "api-key-env"` with `ANTHROPIC_API_KEY` set — headless runs cannot do
+  an interactive login, and clean mode does not inherit a subscription. This also
+  keeps account-level claude.ai connectors from leaking into the worker.
+- Use `--prompt <file>` (or `prompt.file`) rather than a raw `-- claude -p "…"`: it
+  runs `claude --dangerously-skip-permissions` with stdin closed, so the worker
+  neither stalls on approvals nor hangs on a TTY. If you do use `-- claude` yourself,
+  you must add those yourself.
+- `workspace.source` is the repo the task is about (default: the config file's dir).
 
 agentdev prints its diagnostics to **stderr**, so stdout is clean — capturing
 `$(…)` gives you just the agent's answer.
@@ -52,8 +58,8 @@ agentdev prints its diagnostics to **stderr**, so stdout is clean — capturing
 ## Getting results back
 
 - **Simple:** capture stdout, as above. Good for one text answer per task.
-- **Structured / multiple artifacts:** bind a per-run channel dir with `-rw`
-  (it lands at `/external/<basename>` in the container); the worker writes its
+- **Structured / multiple artifacts:** bind a per-run channel dir via the config's
+  `mounts.read_write` map (`{ "<host-dir>": "/external/<run>" }`); the worker writes its
   result there with an **atomic rename** (temp → `mv`), and you read it after the
   worker exits. Completion needs no signal of its own: `agentdev` runs `podman
   run --rm` in the foreground, so the worker process exiting *is* "task done".
@@ -66,11 +72,11 @@ agentdev prints its diagnostics to **stderr**, so stdout is clean — capturing
   and collects `out/result.txt`. Run its `./selftest.sh` to see the flow with no
   image or tokens.
 - If issuing commands yourself: background each worker and `wait`, throttling to a
-  sane concurrency (e.g. 4). Each `--clean` worker takes **no profile lock**, so
-  they run concurrently and safely.
-- **Never point multiple workers at one `--profile`** — the single-instance guard
-  refuses the second. For a shared identity/skills, `agentdev profiles fork base
-  wN` per worker, or provision each worker profile with
+  sane concurrency (e.g. 4). Each `profile.mode: "clean"` worker takes **no profile
+  lock**, so they run concurrently and safely.
+- **Never point multiple workers at one named profile** — the single-instance guard
+  refuses the second. For a shared identity/skills, fork the profile folder
+  (`cp -a base wN`) per worker, or provision each worker profile with
   `sm sync --copy --agent-home <worker-profile>` (see
   `docs/applying-sm-managed-skills.md`). Do provisioning **host-side, before
   launch** — a worker cannot usefully provision itself from inside its sandbox.
@@ -98,7 +104,7 @@ worker never launches containers itself.
 ## Procedure checklist
 
 1. Gather the task list; agree on concurrency.
-2. Ensure `ANTHROPIC_API_KEY` is exported and the image is built (`agentdev doctor`).
+2. Ensure `ANTHROPIC_API_KEY` is exported and the image is built (`make build`).
 3. Dry-run one worker (`--dry-run`) and show it.
 4. On go-ahead, launch — via `orchestrate.sh` for a batch, or the primitive for one.
 5. Collect each result (captured stdout, or `<channel>/*/out/result.txt`).
@@ -108,6 +114,6 @@ worker never launches containers itself.
 ## References (in the agentdev repo)
 
 - `examples/one-shot-orchestrator/` — the working controller + worker + selftest.
-- README → "Run a one-shot command (autonomous agent)" — the per-worker contract.
+- `docs/user-guide.md` §12 — the one-shot prompt contract.
 - `docs/applying-sm-managed-skills.md` — giving workers a managed skill set.
 - `docs/managing-context-and-memory.md` — auth modes and the three kinds of MCP.

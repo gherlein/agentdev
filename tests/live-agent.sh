@@ -48,7 +48,7 @@ fi
 
 # --- throwaway fixtures ----------------------------------------------------
 # As in live.sh we keep the real $HOME (rootless podman's image store lives there)
-# and isolate only AGENTDEV_HOME, the profile roots, and the workspace. network is
+# and isolate the profile roots and the workspace through the config. network is
 # left at the default "off" (no egress *isolation*), so the agent can reach the API.
 ROOT="$(mktemp -d /tmp/agentdev-live-agent.XXXX)"
 # Force-remove any container this run started (profile or proxy labelled) before
@@ -63,15 +63,9 @@ cleanup() {
   rm -rf "$ROOT"
 }
 trap cleanup EXIT
-AH="$ROOT/agentdev-home"
 WS="$ROOT/agentws"                       # plain basename -> mounts at /agentws
-mkdir -p "$AH" "$WS"
-cat > "$AH/config.json" <<EOF
-{
-  "profile": { "profiles_root": "$ROOT/profiles", "clean_root": "$ROOT/clean", "memory_root": "$ROOT/memory" },
-  "template": { "source": "$REPO/templates/default" }
-}
-EOF
+mkdir -p "$WS"
+CFG="$ROOT/agentdev-config.json"
 
 PROF="histmem"
 PDIR="$ROOT/profiles/$PROF"
@@ -82,25 +76,38 @@ MEM_DIR_IN="/home/developer/.claude/agentdev-memory"
 MEM_FILE_IN="$MEM_DIR_IN/secret.txt"
 MEM_FILE_HOST="$PDIR/.claude/agentdev-memory/secret.txt"
 
-# adev ARGS... - run the launcher from the workspace with the isolated
-# AGENTDEV_HOME. ANTHROPIC_API_KEY is unset on purpose: with a key present,
-# auth=auto would choose api-key billing instead of the subscription login under
-# test. stdin is /dev/null as a backstop (--prompt already closes the agent's).
-adev() { ( cd "$WS" && unset ANTHROPIC_API_KEY && AGENTDEV_HOME="$AH" \
-           timeout --kill-after=15 "$RUN_TIMEOUT" "$AD" "$@" </dev/null ) 2>&1; }
+# The one config for every run: a persistent named profile whose roots live under
+# $ROOT, with $WS as the workspace. network is left at the default "off" (no egress
+# isolation), so the agent can reach the API.
+cat > "$CFG" <<EOF
+{
+  "profile":   { "mode": "profile", "name": "$PROF", "profiles_root": "$ROOT/profiles",
+                 "clean_root": "$ROOT/clean", "memory_root": "$ROOT/memory" },
+  "template":  { "source": "$REPO/templates/default" },
+  "workspace": { "source": "$WS" }
+}
+EOF
+
+# adev ARGS... - run the launcher with $CFG. ANTHROPIC_API_KEY is unset on purpose:
+# with a key present, auth=auto would choose api-key billing instead of the
+# subscription login under test. stdin is /dev/null as a backstop (--prompt already
+# closes the agent's).
+adev() { ( unset ANTHROPIC_API_KEY && \
+           timeout --kill-after=15 "$RUN_TIMEOUT" "$AD" -c "$CFG" "$@" </dev/null ) 2>&1; }
 
 # agent_run PROMPT - run one headless agent turn in the profile. The prompt is
 # written to a file and handed to agentdev via --prompt (the only supported way
 # to start the agent on a prompt); agentdev mounts it and runs the agent headless.
 agent_run() {
   printf '%s\n' "$1" > "$ROOT/prompt.txt"
-  adev --profile "$PROF" --prompt "$ROOT/prompt.txt"
+  adev --prompt "$ROOT/prompt.txt"
 }
 
 echo "== Tier C: live agent persistence (image: $IMAGE) =="
 
-# Seed the throwaway profile and pre-create the memory directory inside it.
-adev profiles new "$PROF" >/dev/null 2>&1
+# Seed the throwaway profile with a no-op run (a profile is seeded on first launch;
+# there is no `profiles new`), then pre-create the memory directory inside it.
+adev -- true >/dev/null 2>&1
 mkdir -p "$PDIR/.claude/agentdev-memory"
 
 echo "run 1: agent writes a secret into its memory, leaving a transcript:"
@@ -143,8 +150,7 @@ else
       "expected $SECRET in $WS/answer.txt (after one retry); run2: $out2"
 fi
 
-# Release the profile lock / reap any orphan before the temp dir is removed.
-adev profiles gc >/dev/null 2>&1
+# The EXIT trap force-removes any container this run left before the temp dir goes.
 
 echo
 echo "LIVE-AGENT: $PASS passed, $FAIL failed, $SKIP skipped"

@@ -60,10 +60,9 @@ with open(out, "w") as fh:
 PY
 }
 
-# seed_profile - build $PROFILE from the template. Caller guarantees $PROFILE
-# does not yet exist (clean/first-named) OR is being --reseed'd (config only).
+# seed_profile - build $PROFILE from the template. A profile is seeded once, on
+# first creation; the caller guarantees $PROFILE does not yet exist.
 seed_profile() {
-  local reseed="${1:-no}"
   lint_template "$TEMPLATE_SOURCE" || { echo "Error: template failed lint; aborting." >&2; exit 1; }
 
   mkdir -p "$PROFILE/.claude"
@@ -75,11 +74,6 @@ seed_profile() {
       cp -a "$TEMPLATE_SOURCE/$item" "$PROFILE/.claude/"
     fi
   done
-
-  if [[ "$reseed" == "reseed" ]]; then
-    echo "Re-seeded config into existing profile: $PROFILE" >&2
-    return 0
-  fi
 
   # Runtime scaffolding (empty but valid).
   mkdir -p "$PROFILE/.claude/projects/$ENC/memory"

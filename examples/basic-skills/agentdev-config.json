@@ -4,7 +4,7 @@
     "image": "ghcr.io/gherlein/agentdev:latest"
   },
   "profile": {
-    "default_mode": "profile",
+    "mode": "profile",
     "name": "basic-skills"
   },
   "auth": {
@@ -12,7 +12,11 @@
   },
   "template": {
     "source": "./template",
-    "include": ["CLAUDE.md", "settings.json", "skills"]
+    "include": [
+      "CLAUDE.md",
+      "settings.json",
+      "skills"
+    ]
   },
   "workspace": {
     "trust": "skip-permissions",
@@ -25,6 +29,8 @@
     "workspace": "rw"
   },
   "sandbox": {
-    "ssh": true
+    "ssh": true,
+    "usb": true,
+    "host_ca": true
   }
 }

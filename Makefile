@@ -7,7 +7,7 @@ PREFIX     ?= $(HOME)/.local
 BINDIR     := $(PREFIX)/bin
 
 SHELLS  := agentdev $(wildcard lib/*.sh) image/entrypoint.sh tests/smoke.sh tests/live.sh tests/live-agent.sh
-PYFILES := lib/jsoncfg.py image/proxy.py tests/matrix.py tests/test_proxy.py
+PYFILES := lib/jsoncfg.py lib/allowcheck.py image/proxy.py tests/matrix.py tests/test_proxy.py
 
 .DEFAULT_GOAL := help
 
@@ -53,10 +53,6 @@ lint: ## Syntax-check shell + python (uses shellcheck if installed)
 	@for f in $(SHELLS); do bash -n "$$f" && echo "ok  $$f"; done
 	@python3 -m py_compile $(PYFILES) && echo "ok  $(PYFILES)"
 	@command -v shellcheck >/dev/null 2>&1 && shellcheck -S warning $(SHELLS) || echo "note: shellcheck not installed, skipped"
-
-.PHONY: doctor
-doctor: ## Run the environment check
-	./agentdev doctor
 
 .PHONY: install
 install: ## Symlink the launcher into PREFIX/bin (default ~/.local/bin)

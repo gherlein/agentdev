@@ -30,8 +30,7 @@ setup_network() {
   esac
 
   if [[ ${#NET_ALLOW[@]} -eq 0 ]]; then
-    echo "Error: network.mode=allowlist but the allowlist is empty." >&2
-    echo "       Add hosts under [network].allow, or use --net=none for no egress." >&2
+    echo "Error: network.mode=allowlist but network.allow is empty." >&2
     exit 1
   fi
 
@@ -106,40 +105,7 @@ teardown_network() {
   [[ -n "${NET_WORKDIR:-}" && -d "$NET_WORKDIR" ]] && rm -rf "$NET_WORKDIR" || true
 }
 
-# gc_networks - reap agentdev proxy sidecars and networks left by crashed runs.
-# Called from `profiles gc`. Best-effort; prints what it removed.
-gc_networks() {
-  local cid name
-  while read -r cid; do
-    [[ -n "$cid" ]] || continue
-    name=$(podman inspect "$cid" --format '{{.Name}}' 2>/dev/null || echo "$cid")
-    podman rm -f "$cid" >/dev/null 2>&1 && echo "gc: removed proxy sidecar $name"
-  done < <(podman ps -a --filter 'label=agentdev.proxy' --format '{{.ID}}' 2>/dev/null)
-  while read -r net; do
-    [[ -n "$net" ]] || continue
-    podman network rm "$net" >/dev/null 2>&1 && echo "gc: removed network $net"
-  done < <(podman network ls --filter 'label=agentdev.net' --format '{{.Name}}' 2>/dev/null)
-}
-
-# cmd_report NAME - print the egress log a --net=allowlist run recorded in a
-# profile: ALLOW/DENY totals and a per-destination tally. Requires PROFILES_ROOT.
-cmd_report() {
-  local name="${1:-}"
-  [[ -n "$name" ]] || { echo "usage: agentdev report <profile>" >&2; return 1; }
-  local log="$PROFILES_ROOT/$name/agentdev-egress.log"
-  if [[ ! -f "$log" ]]; then
-    echo "No egress log for profile '$name'." >&2
-    echo "  expected at: $log" >&2
-    echo "  produce one with: agentdev --profile $name --net=allowlist   (or --eval)" >&2
-    return 1
-  fi
-  local total allow deny
-  total=$(wc -l < "$log")
-  allow=$(grep -c $'\tALLOW\t' "$log" || true)
-  deny=$(grep -c $'\tDENY\t' "$log" || true)
-  echo "Egress report for profile '$name'"
-  echo "  log:      $log"
-  echo "  requests: $total   allow: $allow   deny: $deny"
-  echo "  destinations (count  decision  host:port):"
-  cut -f2,4 "$log" | sort | uniq -c | sort -rn | sed 's/^/    /'
-}
+# The egress log (network.log=true) is a plain tab-separated file in the profile at
+# <profile>/agentdev-egress.log:  ISO8601 <TAB> ALLOW|DENY <TAB> METHOD <TAB> host:port <TAB> path
+# Read it with ordinary tools, e.g. a per-destination tally:
+#   cut -f2,4 <profile>/agentdev-egress.log | sort | uniq -c | sort -rn

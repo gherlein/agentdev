@@ -46,9 +46,10 @@ sm probe --yes
 sm sync --copy --agent-home ~/.agentdev/profiles/research
 #    → ~/.agentdev/profiles/research/.claude/skills/<name>/   (real dirs, each with a .sm-copy marker)
 
-# 3. launch the agent against that profile; it reads the skills as its own
+# 3. launch the agent against that profile (profile.mode: profile, profile.name: research
+#    in agentdev-config.json); it reads the skills as its own
 echo "use the available skills to …" > task.md
-agentdev --profile research --prompt task.md
+agentdev --prompt task.md
 ```
 
 Inspect or update at any time:
@@ -71,21 +72,23 @@ A profile can receive skills two ways, and they are designed to compose:
 They don't collide. Each `sm` copy carries a hidden `.sm-copy` provenance
 marker; `sm` only ever refreshes or removes directories that have it, so a
 template- or hand-placed skill (no marker) is reported as *unmanaged* and left
-untouched. Conversely, agentdev's `--reseed` re-applies template items without
-disturbing `sm`'s copies. Ownership is partitioned at the file level: `sm` owns
-what it marked, the template owns the rest.
+untouched. Ownership is partitioned at the file level: `sm` owns what it marked,
+the template owns the rest. (A profile is seeded once and not re-seeded; to pick up
+template changes, delete the profile folder and relaunch — `sm`'s marked copies in a
+separate store are unaffected.)
 
 ## Lifecycle: which mode to provision
 
-- **Named / persistent profile (`--profile`): the clean fit.** Provision once;
-  re-run `sm sync --copy --agent-home <profile>` whenever the store changes and
-  `sm` reconciles and refreshes in place. Skills persist across runs with the
-  rest of the profile.
+- **Named / persistent profile (`profile.mode: "profile"`): the clean fit.**
+  Provision once; re-run `sm sync --copy --agent-home <profile>` whenever the store
+  changes and `sm` reconciles and refreshes in place. Skills persist across runs with
+  the rest of the profile.
 - **Clean / remember (throwaway home):** the home lives at an agentdev-chosen
   per-run path that only exists during the run, so there is no stable directory
   to `sm`-provision beforehand. For a dynamic, managed skill set in these modes,
   either:
-  - provision a **named profile** once and run `--profile` instead of `--clean`, or
+  - provision a **named profile** once and use `profile.mode: "profile"` instead of
+    `clean`, or
   - bake a **static** set into the agentdev **template's** `skills/` directory so
     every seeded home gets it automatically.
 
@@ -103,10 +106,10 @@ consumer.
 
 This composes with the one-shot orchestrator
 ([`examples/one-shot-orchestrator/`](../examples/one-shot-orchestrator/)): give
-each worker a provisioned **named profile** (fork a base profile per worker and
-`sm sync --copy` into each), then launch `agentdev --profile <worker>` for the
-task. Each container then has the same managed skill set, materialized and
-self-contained.
+each worker a provisioned **named profile** (fork a base profile folder per worker
+with `cp -a` and `sm sync --copy` into each), then launch each worker with a config
+whose `profile.name` points at its fork. Each container then has the same managed
+skill set, materialized and self-contained.
 
 ## Coupling
 
