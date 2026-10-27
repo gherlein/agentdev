@@ -43,20 +43,39 @@ config file defines the whole run.** Two things are mounted into every launch:
 Everything else stays outside unless the config mounts it. A profile is a plain folder;
 agentdev never versions it.
 
-## 2. Install and requirements
+## 2. Install and build
 
-Requirements: **podman**, **python3**, and **Linux** (for `--userns=keep-id` ownership
-mapping; macOS works via a podman machine).
+### Requirements
+
+**podman**, **python3**, and **Linux** (for `--userns=keep-id` ownership mapping; macOS
+works via a podman machine).
+
+### Install the launcher
 
 ```bash
-git clone <this repo> ~/src/agentdev && cd ~/src/agentdev
-make build                       # build the container image once
+git clone https://github.com/gherlein/agentdev ~/src/agentdev && cd ~/src/agentdev
 make install                     # symlink the launcher onto your PATH (~/.local/bin)
-export ANTHROPIC_API_KEY=sk-...  # for api-key auth (clean/remember modes; see §6)
 ```
 
-Re-run `make build` after changing the image. There is no `agentdev build` subcommand — the
-image is built through the Makefile.
+`make install` **symlinks** the launcher rather than copying it — it is not a single
+self-contained file; it sources `lib/`, `templates/`, and `image/` from the checkout — so
+your edits and `git pull` take effect immediately. `make uninstall` removes the symlink.
+
+Or install a tagged release with Homebrew (`brew tap gherlein/tap && brew trust gherlein/tap
+&& brew install agentdev`); see the [README](../README.md#install).
+
+### Build the image
+
+The agent runs inside a container image you build once with the Makefile — there is no
+`agentdev build` subcommand:
+
+```bash
+make build                       # build ghcr.io/gherlein/agentdev:latest
+make digest                      # print the pin-by-digest ref to set as agent.image
+```
+
+Re-run `make build` after changing anything under `image/`. A Homebrew install skips this
+step — the image is pulled from ghcr.io on first launch.
 
 ## 3. The command line
 
@@ -73,7 +92,7 @@ are:
 
 There are **no other flags and no subcommands.** The agent, model, mounts, network, auth,
 trust, and workspace all live in the config file (§4). Profiles and memory stores are plain
-folders you manage yourself (§13). The image is built with `make build`.
+folders you manage yourself (§13).
 
 ```bash
 cd ~/src/my-project
@@ -116,9 +135,78 @@ Error: config file failed validation: ./agentdev-config.json
 
 Keys starting with `//` are treated as comments. The full schema is in §19.
 
+### An example
+
+Every key, with its default value, in one file — read it top to bottom and you see the
+whole run. Any key you leave out falls back to exactly the default shown here:
+
+```jsonc
+{
+  "agent": {
+    "name":  "claude",                            // only "claude" so far
+    "image": "ghcr.io/gherlein/agentdev:latest"   // pin by digest for a reproducible run
+  },
+  "model": {
+    "id":       "claude-opus-5-5",                // -> ANTHROPIC_MODEL ("" = agent default)
+    "provider": "anthropic",                      // anthropic | bedrock | vertex
+    "base_url": "",                               // a gateway or self-hosted endpoint URL
+    "pass_env": []                                // host env var names to forward (credentials)
+  },
+  "prompt": {
+    "file": ""                                    // run headless on this file, then exit
+  },
+  "profile": {
+    "mode":          "clean",                     // clean | remember | profile
+    "name":          "",                          // profile mode: which named profile
+    "memory_store":  "default",                   // remember mode: which memory store
+    "keep":          false,                        // clean mode: keep the throwaway profile
+    "profiles_root": "~/.agentdev/profiles",
+    "clean_root":    "~/.cache/agentdev/clean",
+    "memory_root":   "~/.agentdev/memory"
+  },
+  "template": {
+    "source":  "~/.agentdev/templates/default",   // seed template for a fresh profile
+    "include": ["CLAUDE.md", "settings.json", "hooks", "skills", ".mcp.json"]
+  },
+  "auth": {
+    "mode": "auto"                                // auto | api-key-env | interactive | inherit-credentials
+  },
+  "workspace": {
+    "source":  ".",                               // host folder mounted at /<basename> (default: config dir)
+    "trust":   "skip-permissions",                // skip-permissions | workspace-only | prompt
+    "workdir": "."                                // entry folder: the shell's cwd (relative to the workspace)
+  },
+  "network": {
+    "mode":  "off",                               // off | none | allowlist
+    "allow": [],                                  // allowlist: reachable host[:port] rules
+    "log":   false,                               // record egress to <profile>/agentdev-egress.log
+    "mitm":  false                                // per-URL filtering (terminates TLS)
+  },
+  "mounts": {
+    "workspace":  "rw",                           // rw | ro (the workspace mount mode)
+    "confirm_rw": false,                          // prompt before each read-write mount
+    "rw_allow":   [],                             // pre-approve rw sources under confirm_rw
+    "read_only":  {},                             // { "host/src": "dest" } read-only mounts
+    "read_write": {},                             // { "host/src": "dest" } read-write mounts
+    "devices":    []                              // host device nodes to pass through
+  },
+  "sandbox": {
+    "ssh":     true,                              // host SSH keys + agent socket
+    "usb":     true,                              // /dev/bus/usb
+    "host_ca": true                               // host extra TLS trust anchors
+  }
+}
+```
+
+Preview exactly what a config produces — mounts, model endpoint, network, auth — with
+`agentdev --dry-run` before launching. For a ready-made starting point, copy
+[`examples/minimal/agentdev-config.json`](../examples/minimal/) (or another
+[`examples/`](../examples/)) and edit from there. Each key is documented in §19.
+
 ## 5. Modes
 
-`profile.mode` chooses where the agent's home lives and what survives:
+Set `profile.mode` in the config file to choose where the agent's home lives and what
+survives:
 
 | `profile.mode` | Config keys | Memory | History | Lifetime |
 |---|---|---|---|---|

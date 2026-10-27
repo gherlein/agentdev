@@ -1,0 +1,40 @@
+# Homebrew formula template for agentdev. scripts/release.sh renders __VERSION__ and
+# __SHA256__ at release time and opens a PR to gherlein/homebrew-tap. Do not fill the
+# placeholders by hand — edit this template, then cut a release.
+class Agentdev < Formula
+  desc "Run a coding agent (Claude Code) in an isolated, config-driven container"
+  homepage "https://github.com/gherlein/agentdev"
+  url "https://github.com/gherlein/agentdev/archive/refs/tags/v__VERSION__.tar.gz"
+  sha256 "__SHA256__"
+  license "MIT"
+  head "https://github.com/gherlein/agentdev.git", branch: "main"
+
+  depends_on :linux          # rootless podman + --userns=keep-id; GNU flock/realpath/sha256sum
+  depends_on "podman"        # Homebrew manages the container runtime
+  depends_on "python@3.13"   # the launcher shells out to python3
+
+  def install
+    # The launcher is not self-contained: it sources lib/*.sh and reaches templates/
+    # and image/ relative to its own resolved path. Install the whole tree into
+    # libexec and symlink the launcher into bin; the launcher's `readlink -f "$0"`
+    # resolves the symlink back to libexec, so the siblings are found.
+    libexec.install "agentdev", "lib", "templates", "image", "examples", "Makefile"
+    bin.install_symlink libexec/"agentdev"
+  end
+
+  def caveats
+    <<~EOS
+      agentdev runs the agent in rootless podman. Verify it works once:
+        podman info
+      The container image is pulled from ghcr.io on first launch (--pull=missing),
+      or ahead of time:
+        podman pull ghcr.io/gherlein/agentdev:latest
+      Copy a starter config into your project:
+        cp #{libexec}/examples/minimal/agentdev-config.json .
+    EOS
+  end
+
+  test do
+    assert_match "Usage: agentdev", shell_output("#{bin}/agentdev --help")
+  end
+end

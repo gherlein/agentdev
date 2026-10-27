@@ -6,7 +6,7 @@ GO_VERSION ?= 1.25.0
 PREFIX     ?= $(HOME)/.local
 BINDIR     := $(PREFIX)/bin
 
-SHELLS  := agentdev $(wildcard lib/*.sh) image/entrypoint.sh tests/smoke.sh tests/live.sh tests/live-agent.sh
+SHELLS  := agentdev $(wildcard lib/*.sh) image/entrypoint.sh scripts/release.sh tests/smoke.sh tests/live.sh tests/live-agent.sh
 PYFILES := lib/jsoncfg.py lib/allowcheck.py image/proxy.py tests/matrix.py tests/test_proxy.py
 
 .DEFAULT_GOAL := help
@@ -63,6 +63,16 @@ install: ## Symlink the launcher into PREFIX/bin (default ~/.local/bin)
 .PHONY: uninstall
 uninstall: ## Remove the symlink from PREFIX/bin
 	rm -f "$(BINDIR)/agentdev"
+
+.PHONY: release
+release: ## Tag vVERSION and open a Homebrew tap PR (VERSION=X.Y.Z; needs gh). Prompts before pushing.
+	@test -n "$(VERSION)" || { echo "usage: make release VERSION=X.Y.Z"; exit 1; }
+	./scripts/release.sh "$(VERSION)"
+
+.PHONY: release-dry
+release-dry: ## Preview the release: run checks + render the formula, no tag/push/PR (VERSION=X.Y.Z)
+	@test -n "$(VERSION)" || { echo "usage: make release-dry VERSION=X.Y.Z"; exit 1; }
+	./scripts/release.sh --dry-run "$(VERSION)"
 
 .PHONY: clean
 clean: ## Remove local build/test cruft (pycache); image is left intact
