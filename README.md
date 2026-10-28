@@ -127,6 +127,12 @@ itself, headless, then exit. Here's a whole file; each block is explained below 
     "tty_devices": ["/dev/ttyUSB0"]                                       // serial/tty devices to pass through (/dev/ttyX)
   },
 
+  "skills": {                                                             // a read-only bundle from the shared store (omit for none)
+    "store":   "~/.local/share/skills",                                  // the shared, flat skills store (default: XDG data home)
+    "profile": "backend",                                                // a named bundle: $XDG_CONFIG_HOME/agentdev/profiles/backend
+    "include": ["git-ops", "documentation"]                              // extra skills by name (composes with the profile)
+  },
+
   // Omit "one-shot" for an interactive shell; include it to run the agent headless, then exit:
   "one-shot": {
     "agent":  "claude",                              // supported agent: claude | pi | omp (agentdev maps it to the in-container executable)
@@ -183,6 +189,23 @@ Every key is optional and takes a built-in default; omit a whole block to accept
   the agent's home and mounts it there.** Omit them and history/memory stay in `agent_folder` (or,
   if that's omitted too, on the ephemeral container filesystem — lost on exit).
 - `tty_devices` — an array of serial/tty devices to pass through; each must be a `/dev/ttyX`.
+
+### skills — a read-only bundle from the shared store
+
+- One shared, agent-neutral **store** holds every skill, flat, one directory per skill
+  (the [Skill Embedding Standard](https://github.com/gherlein/skill-embedding-standard)).
+  `store` defaults to `$XDG_DATA_HOME/skills` (`~/.local/share/skills`).
+- `profile` names a **bundle**: a file at `$XDG_CONFIG_HOME/agentdev/profiles/<name>` listing
+  skill names one per line (`#` comments and blank lines ignored).
+- `include` adds skills by name inline; it composes with `profile` (deduplicated).
+- agentdev copies the selected skills into the agent's `.claude/skills` and mounts them
+  **read-only** — the agent reads them but cannot modify them. It is **one mount regardless of
+  skill count**, recomputed from the config on every launch, so nothing persists or drifts.
+- A persistent home's hand-placed skills are kept and **win** a name collision; a requested name
+  that is not a conforming skill in the store aborts the launch (fail-closed).
+- Read-only is a bind mount, not file permissions, because the agent can reach container-root and
+  would otherwise be able to rewrite its own skills — see
+  [`docs/containment-testing.md`](./docs/containment-testing.md).
 
 ### one-shot — run the agent headless (optional, last because it's the exception)
 

@@ -21,6 +21,7 @@ and `-- command`), so each test writes a config and runs `agentdev -c <cfg> …`
 | `mounts.read_only` / `read_write` | `[{src,dest}]` | src exists; dest absolute; targets unique |
 | `mounts.history` / `memory` | path | agent must have a separable history/memory folder |
 | `mounts.tty_devices` | `[/dev/ttyX]` | each matches `/dev/ttyX` and is a device node |
+| `skills.store` / `profile` / `include` | path / name / `[name]` | store exists; each name a conforming skill; profile file exists |
 | `one-shot` | `{agent, model, prompt}` | agent ∈ {claude, omp, pi}; a one-shot run needs a prompt |
 
 ## Tier A — offline plan tests (the bulk)
@@ -42,6 +43,9 @@ no network, no real credentials, so it runs exhaustively in CI with no podman. W
     `read_write` pairs, claude history+memory redirects, omp memory redirect, tty device).
   - **G4** network (off / none / allowlist + proxy env).
   - **G5** negatives (fail closed).
+  - **G6** skills (`profile`+`include` resolved against the store, dedup, profile comments,
+    hand-placed-wins fold, and the fail-closed negatives: unknown name, missing profile,
+    missing store, non-conforming skill).
 
 ### Negative suite (must exit non-zero with a specific message)
 
@@ -60,6 +64,8 @@ the `adev` helper). Checks:
 - **`workspace.ssh: false`** → `/home/developer/.ssh` absent.
 - **`read_write` pair** → the mounted dir is writable inside.
 - **agent home** → a file placed in `agent_folder/.claude` is visible at `/home/developer/.claude`.
+- **skills** → a `skills.include` skill is present at `/home/developer/.claude/skills/<name>` and is
+  **not writable** inside (the read-only mount holds against the agent).
 - **single-instance** → a second run on the same `mounts.agent_folder` is refused.
 - **network none** → `curl` fails; **allowlist** → a denied host is blocked (and an allowed host
   reachable where the environment has upstream egress).
