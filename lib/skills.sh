@@ -82,9 +82,28 @@ skills_resolve() {
   printf '%s\n' "${final[@]:-}"
 }
 
+# _skills_copy SRC DEST - copy a whole skill directory, then drop any symlink that is
+# absolute or resolves outside the copied skill: it would dangle in the container or
+# expose a host path, so a copier omits it (Skill Embedding Standard, §5.4).
+_skills_copy() {
+  local src="$1" dest="$2" link target rp drp
+  cp -a "$src" "$dest"
+  drp="$(realpath -m "$dest")"
+  while IFS= read -r -d '' link; do
+    target="$(readlink "$link")"
+    rp="$(realpath -m "$link")"
+    if [[ "$target" == /* || ( "$rp" != "$drp" && "$rp" != "$drp"/* ) ]]; then
+      echo "Note: skills '$(basename "$dest")': dropped symlink $(basename "$link") -> $target (absolute or escapes the skill)." >&2
+      rm -f "$link"
+    fi
+  done < <(find "$dest" -type l -print0)
+}
+
 # collect_skills - the single entry point the launcher calls. Resolves the final name
-# set into SKILLS_LIST (and leaves SKILLS_MOUNT empty here; a later step fills it on a
-# real run). A missing/invalid selection aborts the launch, in dry-run too.
+# set into SKILLS_LIST, and on a real run copies each skill into a staging dir and mounts
+# it read-only at .claude/skills. A missing/invalid selection aborts the launch, in
+# dry-run too. Read-only is a bind mount (not file perms) so even container-root cannot
+# mutate a skill (see docs/containment-testing.md).
 collect_skills() {
   SKILLS_LIST=""; SKILLS_MOUNT=(); SKILLS_STAGING=""
   skills_wanted || return 0
@@ -92,4 +111,20 @@ collect_skills() {
   local -a names=(); local n
   while IFS= read -r n; do [[ -n "$n" ]] && names+=("$n"); done <<< "$out"
   SKILLS_LIST="${names[*]:-}"
+
+  [[ "$DRY_RUN" == yes || ${#names[@]} -eq 0 ]] && return 0
+
+  SKILLS_STAGING="$(mktemp -d)"
+  local src
+  for n in "${names[@]}"; do
+    if [[ -n "$MNT_AGENT_FOLDER" && -d "$MNT_AGENT_FOLDER/.claude/skills/$n" ]]; then
+      src="$MNT_AGENT_FOLDER/.claude/skills/$n"
+    else
+      src="$SKILLS_STORE/$n"
+    fi
+    _skills_copy "$src" "$SKILLS_STAGING/$n"
+  done
+  register_target "$SKILLS_DEST" "skills (read-only bundle)"
+  SKILLS_MOUNT=(-v "$SKILLS_STAGING:$SKILLS_DEST:ro")
+  printf 'Mounting (read-only): %d skill(s) -> %s\n' "${#names[@]}" "$SKILLS_DEST" >&2
 }

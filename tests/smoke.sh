@@ -84,6 +84,15 @@ checkn "skills unknown key rejected" '$JC validate "$TMP/s2.json"'
 printf '{"image":"x","workspace":{"source":"."},"skills":{"include":"notalist"}}' | cfg "$TMP/s3.json"
 checkn "skills include must be list" '$JC validate "$TMP/s3.json"'
 
+echo "skills copy drops escaping symlinks:"
+mkdir -p "$TMP/skc/demo"; printf -- '---\nname: demo\n---\n' > "$TMP/skc/demo/SKILL.md"
+ln -sf /etc/hostname "$TMP/skc/demo/abs.link"   # absolute target -> dropped
+ln -sf SKILL.md      "$TMP/skc/demo/rel.link"   # relative, inside the skill -> kept
+rm -rf "$TMP/skc-dest"
+( source "$REPO/lib/skills.sh"; _skills_copy "$TMP/skc/demo" "$TMP/skc-dest" ) 2>/dev/null
+check  "absolute symlink dropped" '[ ! -L "$TMP/skc-dest/abs.link" ]'
+check  "inside symlink kept"      '[ -L "$TMP/skc-dest/rel.link" ]'
+
 echo
 echo "RESULT: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

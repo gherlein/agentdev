@@ -193,6 +193,7 @@ launch() {
   cleanup_run() {
     teardown_network
     rm -f "${MOUNTS_TMPFILE:-}"
+    rm -rf "${SKILLS_STAGING:-}"
   }
   trap cleanup_run EXIT
 
@@ -206,6 +207,7 @@ launch() {
     "${USERNS[@]}" "${USB[@]}" "${DEVICE_MOUNTS[@]}"
     "${WORKSPACE_MOUNT[@]}"
     "${HOME_MOUNTS[@]}"
+    "${SKILLS_MOUNT[@]}"
     "${SSH_MOUNT[@]}" "${SSH_AGENT[@]}"
     "${VOLUME_MOUNTS[@]}"
     "${PROMPT_MOUNT[@]}"
