@@ -103,6 +103,20 @@ checkn "mcp non-string rejected"   '$JC validate "$TMP/m3.json"'
 printf '{"image":"x","workspace":{"source":"."},"mcp":{}}' | cfg "$TMP/m4.json"
 checkn "mcp object rejected"       '$JC validate "$TMP/m4.json"'
 
+echo "mcp file validation:"
+printf '{"mcpServers":{"x":{"command":"true"}}}' > "$TMP/good.json"
+check  "valid mcpServers accepted"   '( source "$REPO/lib/mcp.sh"; _mcp_validate_file "$TMP/good.json" )'
+printf '{ not json' > "$TMP/badjson.json"
+checkn "malformed json rejected"     '( source "$REPO/lib/mcp.sh"; _mcp_validate_file "$TMP/badjson.json" )'
+printf '{"foo":{}}' > "$TMP/noms.json"
+checkn "missing mcpServers rejected" '( source "$REPO/lib/mcp.sh"; _mcp_validate_file "$TMP/noms.json" )'
+printf '{"mcpServers":[]}' > "$TMP/arrms.json"
+checkn "mcpServers-not-object rej."  '( source "$REPO/lib/mcp.sh"; _mcp_validate_file "$TMP/arrms.json" )'
+# secrets never logged: the error names the path, not the file's contents
+printf '{"mcpServers":"SECRET_TOKEN_ABC"}' > "$TMP/leak.json"
+leakerr="$( ( source "$REPO/lib/mcp.sh"; _mcp_validate_file "$TMP/leak.json" ) 2>&1 1>/dev/null )"
+{ echo "$leakerr" | grep -q "leak.json" && ! echo "$leakerr" | grep -q "SECRET_TOKEN_ABC"; } && ok || bad "error names path not contents"
+
 echo
 echo "RESULT: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
