@@ -280,6 +280,55 @@ def main():
             ("note hand-placed wins", lambda o: "hand-placed" in o.lower()),
         ])
 
+        print("G7  mcp")
+        def mkmcp(path, server="demo"):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fh:
+                json.dump({"mcpServers": {server: {"command": "true"}}}, fh)
+            return path
+        def mcpdest(name):
+            return f"/home/developer/.agentdev-mcp/{name}"
+        good = mkmcp(P("mcpcfg", "good.json"))
+        osbase = {**base, "one-shot": {"agent": "claude", "prompt": "task.md"}}
+
+        positive("mcp one-shot flags", {**osbase, "mcp": [good]}, root, home, [
+            ("strict flag", lambda o: "--strict-mcp-config" in podman_line(o)),
+            ("mcp-config flag", lambda o: "--mcp-config" in podman_line(o)),
+            ("staged 00-good.json", lambda o: mcpdest("00-good.json") in podman_line(o)),
+            ("plan line strict", lambda o: "strict" in line(o, "mcp:")),
+        ])
+        positive("mcp deny-all", {**osbase, "mcp": []}, root, home, [
+            ("strict flag", lambda o: "--strict-mcp-config" in podman_line(o)),
+            ("no --mcp-config", lambda o: "--mcp-config" not in podman_line(o)),
+            ("plan deny-all", lambda o: "deny-all" in line(o, "mcp:")),
+        ])
+        positive("mcp absent", dict(osbase), root, home, [
+            ("no strict flag", lambda o: "--strict-mcp-config" not in podman_line(o)),
+            ("no AGENTDEV_MCP_ARGS", lambda o: "AGENTDEV_MCP_ARGS" not in o),
+        ])
+        a = mkmcp(P("mcpcfg", "a.json"))
+        b = mkmcp(P("mcpcfg", "b.json"))
+        positive("mcp multiple + order", {**osbase, "mcp": [a, b]}, root, home, [
+            ("00-a and 01-b ordered", lambda o: mcpdest("00-a.json") in podman_line(o)
+                and mcpdest("01-b.json") in podman_line(o)
+                and podman_line(o).index("00-a.json") < podman_line(o).index("01-b.json")),
+        ])
+        c1 = mkmcp(P("d1", "s.json"))
+        c2 = mkmcp(P("d2", "s.json"))
+        positive("mcp basename collision", {**osbase, "mcp": [c1, c2]}, root, home, [
+            ("00-s.json present", lambda o: mcpdest("00-s.json") in podman_line(o)),
+            ("01-s.json present", lambda o: mcpdest("01-s.json") in podman_line(o)),
+        ])
+        positive("mcp interactive env", {**base, "mcp": [good]}, root, home, [
+            ("AGENTDEV_MCP_ARGS set", lambda o: "AGENTDEV_MCP_ARGS=" in podman_line(o)),
+            ("strict in env", lambda o: "--strict-mcp-config" in podman_line(o)),
+            ("command ends in bash", lambda o: podman_line(o).rstrip().endswith(" bash")),
+        ])
+        negative("mcp rejects non-claude", {**base, "one-shot": {"agent": "omp", "prompt": "task.md"},
+                 "mcp": [good]}, root, home, "claude agent")
+        negative("mcp missing file", {**osbase, "mcp": [P("nope.json")]}, root, home,
+                 "not an existing readable file")
+
         print(f"\nMATRIX: {PASS} passed, {FAIL} failed")
         return 1 if FAIL else 0
     finally:
