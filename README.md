@@ -255,6 +255,10 @@ cut -f2,4 <agent_folder>/agentdev-egress.log | sort | uniq -c | sort -rn
 For fanning prompts across many tasks in parallel, see
 [`examples/one-shot-orchestrator/`](./examples/one-shot-orchestrator/).
 
+To verify the containment actually holds — a real authenticated agent is told to break out and
+proven host-side that it cannot — run `make test-live-containment`; the method is documented in
+[`docs/containment-testing.md`](./docs/containment-testing.md).
+
 ## Layout
 
 ```
