@@ -49,12 +49,15 @@ agent_model_env() {
   case "$1" in claude) printf 'ANTHROPIC_MODEL\n' ;; *) printf '\n' ;; esac
 }
 
-# agent_headless_cmd NAME PROMPT_PATH -> the in-container command that runs the
-# agent once on the prompt file, then exits. The prompt is read via command
-# substitution and stdin is closed so a headless run never blocks on a TTY.
+# agent_headless_cmd NAME PROMPT_PATH [EXTRA_FLAGS] -> the in-container command that
+# runs the agent once on the prompt file, then exits. The prompt is read via command
+# substitution and stdin is closed so a headless run never blocks on a TTY. EXTRA_FLAGS
+# (container-side, agentdev-controlled: the mcp --strict-mcp-config/--mcp-config string)
+# is spliced in for claude only; omp/pi have no such surface.
 agent_headless_cmd() {
+  local extra="${3:+$3 }"
   case "$1" in
-    claude) printf 'claude --dangerously-skip-permissions -p "$(cat %q)" </dev/null' "$2" ;;
+    claude) printf 'claude --dangerously-skip-permissions %s-p "$(cat %q)" </dev/null' "$extra" "$2" ;;
     omp)    printf 'omp -p "$(cat %q)" </dev/null' "$2" ;;   # best-effort (VISION §9)
     pi)     printf 'pi -p "$(cat %q)" </dev/null' "$2" ;;    # best-effort (VISION §9)
   esac

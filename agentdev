@@ -12,7 +12,7 @@ set -euo pipefail
 SELFDIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 LIBDIR="$SELFDIR/lib"
 
-for m in config agents mounts net skills; do
+for m in config agents mounts net skills mcp; do
   # shellcheck source=/dev/null
   source "$LIBDIR/$m.sh"
 done
@@ -134,6 +134,9 @@ launch() {
 
   if [[ "$RUN_MODE" == one-shot ]]; then
     agent_known "$OS_AGENT" || { echo "Error: one-shot.agent '$OS_AGENT' is not a supported agent (claude | omp | pi)." >&2; exit 1; }
+    if [[ "$MCP_PRESENT" == yes && "$OS_AGENT" != claude ]]; then
+      echo "Error: an mcp block requires the claude agent (omp/pi have no --mcp-config surface); remove mcp or set one-shot.agent=claude." >&2; exit 1
+    fi
     if [[ ${#COMMAND[@]} -gt 0 ]]; then
       echo "Error: a one-shot run cannot be combined with a '-- command'." >&2; exit 1
     fi
@@ -147,9 +150,8 @@ launch() {
     [[ -f "$PROMPT_FILE" && -r "$PROMPT_FILE" ]] || { echo "Error: prompt file not found or unreadable: $PROMPT_FILE" >&2; exit 1; }
     PROMPT_FILE="$(realpath "$PROMPT_FILE")"
     PROMPT_MOUNT=(-v "$PROMPT_FILE:/home/developer/.agentdev-prompt:ro")
-    # Load the workspace .env/.envrc, then run the agent headless on the prompt.
-    local envload='cd "$WORKSPACE" 2>/dev/null || true; if command -v direnv >/dev/null 2>&1 && [ -f .envrc ]; then direnv allow . >/dev/null 2>&1 || true; eval "$(direnv export bash 2>/dev/null)" || true; fi; if [ -f .env ]; then set -a; . ./.env; set +a; fi'
-    COMMAND=(bash -lc "$envload; $(agent_headless_cmd "$OS_AGENT" /home/developer/.agentdev-prompt)")
+    # The headless COMMAND is built after the mount plan, so it can carry the mcp flags
+    # that collect_mcp computes (see below).
   fi
 
   RUN_ID="$(new_run_id)"
@@ -168,6 +170,20 @@ launch() {
   collect_mounts "$DIR_NAME"
   collect_ssh_mount
   collect_skills
+  collect_mcp
+
+  # Build the one-shot headless command now that MCP_FLAGS is known. Load the workspace
+  # .env/.envrc, then run the agent headless on the prompt with any mcp flags spliced in.
+  if [[ "$RUN_MODE" == one-shot ]]; then
+    local envload='cd "$WORKSPACE" 2>/dev/null || true; if command -v direnv >/dev/null 2>&1 && [ -f .envrc ]; then direnv allow . >/dev/null 2>&1 || true; eval "$(direnv export bash 2>/dev/null)" || true; fi; if [ -f .env ]; then set -a; . ./.env; set +a; fi'
+    COMMAND=(bash -lc "$envload; $(agent_headless_cmd "$OS_AGENT" /home/developer/.agentdev-prompt "$MCP_FLAGS")")
+  fi
+
+  # Interactive runs cannot have flags forced onto the claude the operator types, so the
+  # mcp allowlist is advisory there: the files are staged read-only and the ready-made
+  # flags are exported as AGENTDEV_MCP_ARGS (network.mode is the real backstop).
+  local MCP_ENV=()
+  [[ -n "$MCP_FLAGS" ]] && MCP_ENV=(-e "AGENTDEV_MCP_ARGS=$MCP_FLAGS")
 
   MOUNTS_TMPFILE="$(mktemp)"
   printf "%b" "$MOUNTS_CONTENT" > "$MOUNTS_TMPFILE"
@@ -194,6 +210,7 @@ launch() {
     teardown_network
     rm -f "${MOUNTS_TMPFILE:-}"
     rm -rf "${SKILLS_STAGING:-}"
+    rm -rf "${MCP_STAGING:-}"
   }
   trap cleanup_run EXIT
 
@@ -208,10 +225,12 @@ launch() {
     "${WORKSPACE_MOUNT[@]}"
     "${HOME_MOUNTS[@]}"
     "${SKILLS_MOUNT[@]}"
+    "${MCP_MOUNT[@]}"
     "${SSH_MOUNT[@]}" "${SSH_AGENT[@]}"
     "${VOLUME_MOUNTS[@]}"
     "${PROMPT_MOUNT[@]}"
     "${MODEL_ARGS[@]}"
+    "${MCP_ENV[@]}"
     -v "$MOUNTS_TMPFILE:/home/developer/mounts:ro"
     -e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)"
     -e "HOST_HOME=$HOME" -e "HOST_USER=$(id -un)"
@@ -238,6 +257,13 @@ launch() {
     [[ -n "$MNT_HISTORY" ]] && echo "history:       $MNT_HISTORY"
     [[ -n "$MNT_MEMORY" ]]  && echo "memory:        $MNT_MEMORY"
     skills_wanted && echo "skills:        ${SKILLS_LIST:-(none)} -> $SKILLS_DEST (ro)"
+    if mcp_wanted; then
+      if [[ -n "$MCP_FILES_LIST" ]]; then
+        echo "mcp:           $MCP_FILES_LIST -> $MCP_DEST (ro); strict allowlist"
+      else
+        echo "mcp:           (deny-all; strict, no servers)"
+      fi
+    fi
     echo "credentials:   from .env/.envrc in the workspace"
     if [[ "$NET_MODE" == allowlist ]]; then
       echo "network:       allowlist (${#NET_ALLOW[@]} rule(s), log=$NET_LOG, mitm=$NET_MITM) via proxy sidecar"
@@ -252,6 +278,10 @@ launch() {
     rm -f "$MOUNTS_TMPFILE"
     trap - EXIT
     return 0
+  fi
+
+  if [[ "$RUN_MODE" == interactive ]] && mcp_wanted; then
+    echo "mcp: ${MCP_FILES_LIST:-deny-all} staged read-only at $MCP_DEST; run 'claude \$AGENTDEV_MCP_ARGS ...' to use the allowlist." >&2
   fi
 
   # Close the home-lock fd in the podman child so a detached container cannot pin it.

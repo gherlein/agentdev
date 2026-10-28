@@ -93,6 +93,33 @@ rm -rf "$TMP/skc-dest"
 check  "absolute symlink dropped" '[ ! -L "$TMP/skc-dest/abs.link" ]'
 check  "inside symlink kept"      '[ -L "$TMP/skc-dest/rel.link" ]'
 
+echo "mcp schema:"
+printf '{"image":"x","workspace":{"source":"."},"mcp":["a.json","b.json"]}' | cfg "$TMP/m1.json"
+check  "mcp array validates"       '$JC validate "$TMP/m1.json"'
+printf '{"image":"x","workspace":{"source":"."},"mcp":"a.json"}' | cfg "$TMP/m2.json"
+checkn "mcp string rejected"       '$JC validate "$TMP/m2.json"'
+printf '{"image":"x","workspace":{"source":"."},"mcp":[1]}' | cfg "$TMP/m3.json"
+checkn "mcp non-string rejected"   '$JC validate "$TMP/m3.json"'
+printf '{"image":"x","workspace":{"source":"."},"mcp":{}}' | cfg "$TMP/m4.json"
+checkn "mcp object rejected"       '$JC validate "$TMP/m4.json"'
+
+echo "mcp file validation:"
+printf '{"mcpServers":{"x":{"command":"true"}}}' > "$TMP/good.json"
+check  "valid mcpServers accepted"   '( source "$REPO/lib/mcp.sh"; _mcp_validate_file "$TMP/good.json" )'
+printf '{ not json' > "$TMP/badjson.json"
+checkn "malformed json rejected"     '( source "$REPO/lib/mcp.sh"; _mcp_validate_file "$TMP/badjson.json" )'
+printf '{"foo":{}}' > "$TMP/noms.json"
+checkn "missing mcpServers rejected" '( source "$REPO/lib/mcp.sh"; _mcp_validate_file "$TMP/noms.json" )'
+printf '{"mcpServers":[]}' > "$TMP/arrms.json"
+checkn "mcpServers-not-object rej."  '( source "$REPO/lib/mcp.sh"; _mcp_validate_file "$TMP/arrms.json" )'
+printf '[1,2,3]' > "$TMP/toparr.json"
+toperr="$( ( source "$REPO/lib/mcp.sh"; _mcp_validate_file "$TMP/toparr.json" ) 2>&1 1>/dev/null )"
+{ [ -n "$toperr" ] && ! echo "$toperr" | grep -q "Traceback"; } && ok || bad "top-level array rejected without traceback"
+# secrets never logged: the error names the path, not the file's contents
+printf '{"mcpServers":"SECRET_TOKEN_ABC"}' > "$TMP/leak.json"
+leakerr="$( ( source "$REPO/lib/mcp.sh"; _mcp_validate_file "$TMP/leak.json" ) 2>&1 1>/dev/null )"
+{ echo "$leakerr" | grep -q "leak.json" && ! echo "$leakerr" | grep -q "SECRET_TOKEN_ABC"; } && ok || bad "error names path not contents"
+
 echo
 echo "RESULT: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

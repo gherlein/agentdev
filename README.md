@@ -133,6 +133,8 @@ itself, headless, then exit. Here's a whole file; each block is explained below 
     "include": ["git-ops", "documentation"]                              // extra skills by name (composes with the profile)
   },
 
+  "mcp": ["~/.config/agentdev/mcp/codebase-memory.json"],                 // a strict allowlist of MCP config files (omit to inherit the home; [] = no servers)
+
   // Omit "one-shot" for an interactive shell; include it to run the agent headless, then exit:
   "one-shot": {
     "agent":  "claude",                              // supported agent: claude | pi | omp (agentdev maps it to the in-container executable)
@@ -206,6 +208,33 @@ Every key is optional and takes a built-in default; omit a whole block to accept
 - Read-only is a bind mount, not file permissions, because the agent can reach container-root and
   would otherwise be able to rewrite its own skills — see
   [`docs/containment-testing.md`](./docs/containment-testing.md).
+
+### mcp — a strict allowlist of MCP config files
+
+Control exactly which MCP servers an agent may use. `mcp` is an array of paths to MCP config files
+on the host — ordinary files in the shape Claude accepts for `--mcp-config` / `.mcp.json`:
+
+```json
+{ "mcpServers": { "codebase-memory": { "command": "codebase-memory-mcp", "args": ["--serve"] } } }
+```
+
+- agentdev copies the listed files into a per-run staging dir mounted **read-only** at
+  `/home/developer/.agentdev-mcp` (one mount regardless of count) and wires the agent to load them.
+- **One-shot runs enforce it as a true allowlist:** the headless `claude` command is launched with
+  `--strict-mcp-config --mcp-config …`, so the agent loads **only** these servers and ignores every
+  other scope (the mounted home's `.claude.json`, the workspace `.mcp.json`, user scope).
+- **`mcp` is claude-only.** A one-shot run with `omp`/`pi` and an `mcp` block aborts (those agents
+  have no `--mcp-config` surface).
+- **Presence matters:** omit `mcp` to inherit whatever the mounted home provides (default); `"mcp": []`
+  is a deliberate **deny-all** (strict with zero servers — a hardened, MCP-free run); a non-empty list
+  is the allowlist.
+- **Interactive runs are advisory.** agentdev launches only a shell, so it cannot force a flag onto the
+  `claude` you type. The files are still staged read-only and the ready-made flags are exported as
+  `$AGENTDEV_MCP_ARGS`; the real backstop for remote servers is [`network`](#network).
+- **Keep secrets out of the files:** use `${VAR}` references (Claude expands them from the run's env,
+  which a one-shot already loads from the workspace `.env`), so the files stay commit-safe. agentdev
+  never logs file contents. A missing or malformed file (no top-level `mcpServers`) aborts the launch.
+- Read-only is a bind mount, not file permissions, for the same containment reason as `skills`.
 
 ### one-shot — run the agent headless (optional, last because it's the exception)
 

@@ -280,6 +280,68 @@ def main():
             ("note hand-placed wins", lambda o: "hand-placed" in o.lower()),
         ])
 
+        print("G7  mcp")
+        def mkmcp(path, server="demo"):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fh:
+                json.dump({"mcpServers": {server: {"command": "true"}}}, fh)
+            return path
+        def mcpdest(name):
+            return f"/home/developer/.agentdev-mcp/{name}"
+        good = mkmcp(P("mcpcfg", "good.json"))
+        osbase = {**base, "one-shot": {"agent": "claude", "prompt": "task.md"}}
+
+        positive("mcp one-shot flags", {**osbase, "mcp": [good]}, root, home, [
+            ("strict flag", lambda o: "--strict-mcp-config" in podman_line(o)),
+            ("mcp-config flag", lambda o: "--mcp-config" in podman_line(o)),
+            ("staged 00.json", lambda o: mcpdest("00.json") in podman_line(o)),
+            ("plan line strict", lambda o: "strict" in line(o, "mcp:")),
+            ("plan line shows basename", lambda o: "good.json" in line(o, "mcp:")),
+        ])
+        positive("mcp deny-all", {**osbase, "mcp": []}, root, home, [
+            ("strict flag", lambda o: "--strict-mcp-config" in podman_line(o)),
+            ("no --mcp-config", lambda o: "--mcp-config" not in podman_line(o)),
+            ("plan deny-all", lambda o: "deny-all" in line(o, "mcp:")),
+        ])
+        positive("mcp absent", dict(osbase), root, home, [
+            ("no strict flag", lambda o: "--strict-mcp-config" not in podman_line(o)),
+            ("no AGENTDEV_MCP_ARGS", lambda o: "AGENTDEV_MCP_ARGS" not in o),
+        ])
+        a = mkmcp(P("mcpcfg", "a.json"))
+        b = mkmcp(P("mcpcfg", "b.json"))
+        positive("mcp multiple + order", {**osbase, "mcp": [a, b]}, root, home, [
+            ("00 and 01 ordered", lambda o: mcpdest("00.json") in podman_line(o)
+                and mcpdest("01.json") in podman_line(o)
+                and podman_line(o).index("00.json") < podman_line(o).index("01.json")),
+        ])
+        c1 = mkmcp(P("d1", "s.json"))
+        c2 = mkmcp(P("d2", "s.json"))
+        positive("mcp same-basename files", {**osbase, "mcp": [c1, c2]}, root, home, [
+            ("00.json present", lambda o: mcpdest("00.json") in podman_line(o)),
+            ("01.json present (distinct)", lambda o: mcpdest("01.json") in podman_line(o)),
+        ])
+        # a crafted or spaced basename must not reach the headless command (no injection,
+        # no arg-split): staged files are named by index only, no operator text.
+        eviln = mkmcp(P("evildir", "a;touch_PWNED.json"))
+        positive("mcp hostile basename neutralized", {**osbase, "mcp": [eviln]}, root, home, [
+            ("staged as index name", lambda o: mcpdest("00.json") in podman_line(o)),
+            ("basename not in command", lambda o: "touch_PWNED" not in podman_line(o) and "a;touch" not in podman_line(o)),
+        ])
+        spacen = mkmcp(P("spacedir", "my servers.json"))
+        positive("mcp spaced basename neutralized", {**osbase, "mcp": [spacen]}, root, home, [
+            ("staged as index name", lambda o: mcpdest("00.json") in podman_line(o)),
+            ("no split basename", lambda o: "00-my" not in podman_line(o) and "my servers" not in podman_line(o)),
+        ])
+        positive("mcp interactive env", {**base, "mcp": [good]}, root, home, [
+            ("AGENTDEV_MCP_ARGS set", lambda o: "AGENTDEV_MCP_ARGS=" in podman_line(o)),
+            ("strict in env", lambda o: "--strict-mcp-config" in podman_line(o)),
+            ("command ends in bash", lambda o: podman_line(o).rstrip().endswith(" bash")),
+        ])
+        negative("mcp rejects non-claude", {**base, "one-shot": {"agent": "omp", "prompt": "task.md"},
+                 "mcp": [good]}, root, home, "claude agent")
+        negative("mcp missing file", {**osbase, "mcp": [P("nope.json")]}, root, home,
+                 "not an existing readable file")
+
         print(f"\nMATRIX: {PASS} passed, {FAIL} failed")
         return 1 if FAIL else 0
     finally:

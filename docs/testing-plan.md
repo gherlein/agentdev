@@ -22,6 +22,7 @@ and `-- command`), so each test writes a config and runs `agentdev -c <cfg> …`
 | `mounts.history` / `memory` | path | agent must have a separable history/memory folder |
 | `mounts.tty_devices` | `[/dev/ttyX]` | each matches `/dev/ttyX` and is a device node |
 | `skills.store` / `profile` / `include` | path / name / `[name]` | store exists; each name a conforming skill; profile file exists |
+| `mcp` | `[path]` | each path an existing readable file with a top-level `mcpServers` object; claude-only; `[]` = deny-all |
 | `one-shot` | `{agent, model, prompt}` | agent ∈ {claude, omp, pi}; a one-shot run needs a prompt |
 
 ## Tier A — offline plan tests (the bulk)
@@ -46,6 +47,9 @@ no network, no real credentials, so it runs exhaustively in CI with no podman. W
   - **G6** skills (`profile`+`include` resolved against the store, dedup, profile comments,
     hand-placed-wins fold, and the fail-closed negatives: unknown name, missing profile,
     missing store, non-conforming skill).
+  - **G7** mcp (one-shot `--strict-mcp-config --mcp-config` flags, `[]` deny-all, absent = no
+    flags, multiple files ordered + basename-collision prefixes, interactive `AGENTDEV_MCP_ARGS`,
+    and the fail-closed negatives: non-claude agent, missing file).
 
 ### Negative suite (must exit non-zero with a specific message)
 
@@ -66,6 +70,8 @@ the `adev` helper). Checks:
 - **agent home** → a file placed in `agent_folder/.claude` is visible at `/home/developer/.claude`.
 - **skills** → a `skills.include` skill is present at `/home/developer/.claude/skills/<name>` and is
   **not writable** inside (the read-only mount holds against the agent).
+- **mcp** → an `mcp` config file is staged by index at `/home/developer/.agentdev-mcp/00.json` and is
+  **not writable** inside (the read-only mount holds for MCP config too).
 - **single-instance** → a second run on the same `mounts.agent_folder` is refused.
 - **network none** → `curl` fails; **allowlist** → a denied host is blocked (and an allowed host
   reachable where the environment has upstream egress).

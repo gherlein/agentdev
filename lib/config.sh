@@ -11,6 +11,7 @@
 #   NET_MODE NET_LOG NET_MITM            (NET_ALLOW is an array)
 #   MNT_AGENT_FOLDER MNT_HISTORY MNT_MEMORY   (TTY_DEVICES is an array)
 #   SKILLS_STORE SKILLS_PROFILE               (SKILLS_INCLUDE is an array)
+#   MCP_PRESENT                               (MCP_FILES is an array)
 #   HAVE_ONESHOT OS_AGENT OS_MODEL OS_PROMPT
 # The mount pair-lists (workspace.files, mounts.read_only/read_write) are read
 # directly from the file by mounts.sh via `jsoncfg.py rows`.
@@ -107,6 +108,16 @@ load_config() {
   if [[ "$CONFIG_PRESENT" == yes ]] && _json has "$JSON_CONFIG" "skills"; then
     SKILLS_STORE=$(cfg_path "skills.store" "${XDG_DATA_HOME:-$HOME/.local/share}/skills")
   fi
+
+  # --- mcp (optional; an allowlist of MCP config files to stage) ---
+  # Present-but-empty ([]) is a deliberate deny-all, distinct from an absent key
+  # (inherit the home); MCP_PRESENT keeps them apart. Paths stay raw here and are
+  # anchored + validated in mcp.sh.
+  MCP_PRESENT=no
+  if [[ "$CONFIG_PRESENT" == yes ]] && _json has "$JSON_CONFIG" "mcp"; then
+    MCP_PRESENT=yes
+  fi
+  _read_list "mcp" MCP_FILES
 
   # --- one-shot (optional; absence => interactive) ---
   HAVE_ONESHOT=no
