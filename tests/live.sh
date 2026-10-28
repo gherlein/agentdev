@@ -95,6 +95,14 @@ out=$(adev "{\"skills\":{\"store\":\"$SK\",\"include\":[\"demo\"]}}" -- bash -lc
   echo X > /home/developer/.claude/skills/demo/x 2>/dev/null && echo WRITABLE || echo READONLY')
 grep -q READONLY <<<"$out" && ok "selected skill present and read-only inside" || bad "selected skill present and read-only inside" "$out"
 
+echo "mcp (read-only mount):"
+MC="$ROOT/mcpcfg"; mkdir -p "$MC"
+printf '{"mcpServers":{"demo":{"command":"true"}}}' > "$MC/m.json"
+out=$(adev "{\"mcp\":[\"$MC/m.json\"]}" -- bash -lc '
+  test -f /home/developer/.agentdev-mcp/00-m.json || { echo NOMCP; exit 0; }
+  echo X > /home/developer/.agentdev-mcp/00-m.json 2>/dev/null && echo WRITABLE || echo READONLY')
+grep -q READONLY <<<"$out" && ok "selected mcp config present and read-only inside" || bad "selected mcp config present and read-only inside" "$out"
+
 if [[ "$HAVE_NET" == yes ]]; then
   echo "network isolation:"
   out=$(adev '{"network":{"mode":"none"}}' -- bash -lc 'curl -sS -m 8 https://example.com >/dev/null 2>&1 && echo NET_OK || echo NET_BLOCKED')
