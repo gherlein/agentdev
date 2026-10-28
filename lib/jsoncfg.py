@@ -54,6 +54,11 @@ SCHEMA = {
         "model": "str",
         "prompt": "str",
     },
+    "skills": {
+        "store": "str",
+        "profile": "str",
+        "include": "str-list",
+    },
 }
 
 # Keys from earlier config versions, so a stale file gets a pointed message.

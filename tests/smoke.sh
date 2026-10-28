@@ -76,6 +76,14 @@ check "validate ok"   '$JC validate "$TMP/j.json"'
 printf '{"bogus":1}' | cfg "$TMP/k.json"
 checkn "validate bad" '$JC validate "$TMP/k.json"'
 
+echo "skills schema:"
+printf '{"image":"x","workspace":{"source":"."},"skills":{"store":"/s","profile":"p","include":["a","b"]}}' | cfg "$TMP/s1.json"
+check  "skills block validates"      '$JC validate "$TMP/s1.json"'
+printf '{"image":"x","workspace":{"source":"."},"skills":{"bogus":1}}' | cfg "$TMP/s2.json"
+checkn "skills unknown key rejected" '$JC validate "$TMP/s2.json"'
+printf '{"image":"x","workspace":{"source":"."},"skills":{"include":"notalist"}}' | cfg "$TMP/s3.json"
+checkn "skills include must be list" '$JC validate "$TMP/s3.json"'
+
 echo
 echo "RESULT: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
