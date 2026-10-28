@@ -6,7 +6,7 @@ GO_VERSION ?= 1.25.0
 PREFIX     ?= $(HOME)/.local
 BINDIR     := $(PREFIX)/bin
 
-SHELLS  := agentdev $(wildcard lib/*.sh) image/entrypoint.sh scripts/release.sh tests/smoke.sh tests/live.sh tests/live-agent.sh
+SHELLS  := agentdev $(wildcard lib/*.sh) image/entrypoint.sh scripts/release.sh tests/smoke.sh tests/live.sh tests/live-agent.sh tests/live-containment.sh
 PYFILES := lib/jsoncfg.py image/proxy.py tests/matrix.py tests/test_proxy.py
 
 .DEFAULT_GOAL := help
@@ -47,6 +47,10 @@ test-live: ## Tier B: launch real containers to verify enforcement (needs podman
 .PHONY: test-live-agent
 test-live-agent: ## Tier C: drive a real agent to verify agent-home persistence (needs ANTHROPIC_API_KEY; real model cost)
 	./tests/live-agent.sh
+
+.PHONY: test-live-containment
+test-live-containment: ## Tier D: boot a real agent from copied ~/.claude creds and prove it cannot escape (real model cost)
+	./tests/live-containment.sh
 
 .PHONY: lint
 lint: ## Syntax-check shell + python (uses shellcheck if installed)
