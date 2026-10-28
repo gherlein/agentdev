@@ -91,9 +91,15 @@ persistence end to end, all through one config file (`mounts.agent_folder` set):
 4. one-shot run 2 (fresh session, same home) whose prompt can only succeed by reading the persisted
    secret — retried once, then fails.
 
-Auth is an API key: `ANTHROPIC_API_KEY` (from the host env) is written into a `.env` in the
-workspace, which the one-shot run loads. Gate on podman + image + `ANTHROPIC_API_KEY`; skip
-otherwise. Prompts go through `--prompt`, so there is no inline `-p` and no TTY-stdin hang.
+Auth prefers the operator's own subscription, exactly as Tier D does: `~/.claude`
+credentials (`.credentials.json` plus `~/.claude.json`) are **copied** into the throwaway
+`agent_folder`, and the agent authenticates from them. Only the auth material is copied,
+never the operator's `projects/` or history, so the transcript assertion stays honest —
+`projects/` starts empty and can only fill from this run. If no copied credentials are
+found it falls back to `ANTHROPIC_API_KEY` written into a `.env` in the workspace (the key
+is the fallback only; copied creds take precedence). Gate on podman + image + usable
+credentials (`~/.claude/.credentials.json` or `ANTHROPIC_API_KEY`); skip otherwise. Prompts
+go through `--prompt`, so there is no inline `-p` and no TTY-stdin hang.
 
 ## Tier D — containment trust (gated, real model cost)
 

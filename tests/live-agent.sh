@@ -9,9 +9,11 @@
 #   4. run a SECOND one-shot agent against the same agent_folder whose prompt can only
 #      succeed by reading the secret the first run persisted.
 #
-# This costs real model usage. Auth is an API key: ANTHROPIC_API_KEY (from the host
-# env) is written into a .env in the workspace, which the one-shot run loads. Skips
-# cleanly (exit 0) when podman, the image, or ANTHROPIC_API_KEY is missing.
+# This costs real model usage. Auth prefers the operator's own subscription: ~/.claude
+# credentials are COPIED into the throwaway home (like Tier D), and the agent authenticates
+# from them. If no copied credentials are found, it falls back to ANTHROPIC_API_KEY written
+# into a .env in the workspace. Skips cleanly (exit 0) when podman, the image, or any usable
+# credential (~/.claude/.credentials.json or ANTHROPIC_API_KEY) is missing.
 #
 # Run: make test-live-agent   (or ./tests/live-agent.sh)
 set -uo pipefail
@@ -31,11 +33,16 @@ command -v podman >/dev/null || { echo "live-agent tests: podman not found; skip
 if ! podman image exists "$IMAGE"; then
   echo "live-agent tests: image '$IMAGE' not present (run 'make build'); skipping."; exit 0
 fi
-if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
-  echo "live-agent tests: ANTHROPIC_API_KEY is unset; skipping."; exit 0
+# Credentials: prefer the operator's copied OAuth subscription, else an API key.
+HAVE_OAUTH=no; [[ -f "$HOME/.claude/.credentials.json" ]] && HAVE_OAUTH=yes
+HAVE_KEY=no;   [[ -n "${ANTHROPIC_API_KEY:-}" ]] && HAVE_KEY=yes
+if [[ "$HAVE_OAUTH" == no && "$HAVE_KEY" == no ]]; then
+  echo "live-agent tests: no usable credentials (~/.claude/.credentials.json or ANTHROPIC_API_KEY); skipping."
+  exit 0
 fi
 
 ROOT="$(mktemp -d /tmp/agentdev-live-agent.XXXX)"
+chmod 700 "$ROOT"
 cleanup() {
   local lbl
   for lbl in agentdev.home agentdev.proxy; do
@@ -45,11 +52,27 @@ cleanup() {
   rm -rf "$ROOT"
 }
 trap cleanup EXIT
+# Copied credentials must be removed even on an interrupt during the long agent run:
+# these handlers exit, which fires the EXIT trap above.
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
 
 WS="$ROOT/agentws"; mkdir -p "$WS"               # mounts at /agentws
-printf 'ANTHROPIC_API_KEY=%s\n' "$ANTHROPIC_API_KEY" > "$WS/.env"   # loaded by the one-shot run
+# API key is the fallback only; when OAuth creds are copied in, they take precedence.
+[[ "$HAVE_OAUTH" == no && "$HAVE_KEY" == yes ]] && printf 'ANTHROPIC_API_KEY=%s\n' "$ANTHROPIC_API_KEY" > "$WS/.env"
 AHOME="$ROOT/home"                               # the persistent agent home
 CFG="$ROOT/agentdev-config.json"
+
+# Seed the throwaway home with the operator's OAuth credentials when present (as Tier D
+# does). Only the auth material is copied - .credentials.json plus ~/.claude.json - never
+# the operator's projects/ or history, so the persistence assertions below stay honest:
+# projects/ starts empty, and the transcript check can only pass on a file THIS run writes.
+if [[ "$HAVE_OAUTH" == yes ]]; then
+  mkdir -p "$AHOME/.claude"
+  cp "$HOME/.claude/.credentials.json" "$AHOME/.claude/.credentials.json"
+  [[ -f "$HOME/.claude.json" ]] && cp "$HOME/.claude.json" "$AHOME/.claude.json"
+  chmod -R go-rwx "$AHOME" 2>/dev/null || true
+fi
 
 MEM_DIR_IN="/home/developer/.claude/agentdev-memory"
 MEM_FILE_IN="$MEM_DIR_IN/secret.txt"
@@ -70,6 +93,7 @@ agent_run() {
 }
 
 echo "== Tier C: live agent persistence (image: $IMAGE) =="
+echo "   auth: $([[ "$HAVE_OAUTH" == yes ]] && echo 'copied ~/.claude credentials (live dir untouched)' || echo 'ANTHROPIC_API_KEY via workspace .env')"
 
 # Seed the home with a no-op run (creates an empty .claude), then pre-create the dir.
 ( timeout 60 "$AD" -c "$CFG" -- true ) >/dev/null 2>&1
