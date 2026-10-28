@@ -59,6 +59,7 @@ SCHEMA = {
         "profile": "str",
         "include": "str-list",
     },
+    "mcp": "str-list",
 }
 
 # Keys from earlier config versions, so a stale file gets a pointed message.

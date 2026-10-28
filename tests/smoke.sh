@@ -93,6 +93,16 @@ rm -rf "$TMP/skc-dest"
 check  "absolute symlink dropped" '[ ! -L "$TMP/skc-dest/abs.link" ]'
 check  "inside symlink kept"      '[ -L "$TMP/skc-dest/rel.link" ]'
 
+echo "mcp schema:"
+printf '{"image":"x","workspace":{"source":"."},"mcp":["a.json","b.json"]}' | cfg "$TMP/m1.json"
+check  "mcp array validates"       '$JC validate "$TMP/m1.json"'
+printf '{"image":"x","workspace":{"source":"."},"mcp":"a.json"}' | cfg "$TMP/m2.json"
+checkn "mcp string rejected"       '$JC validate "$TMP/m2.json"'
+printf '{"image":"x","workspace":{"source":"."},"mcp":[1]}' | cfg "$TMP/m3.json"
+checkn "mcp non-string rejected"   '$JC validate "$TMP/m3.json"'
+printf '{"image":"x","workspace":{"source":"."},"mcp":{}}' | cfg "$TMP/m4.json"
+checkn "mcp object rejected"       '$JC validate "$TMP/m4.json"'
+
 echo
 echo "RESULT: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
