@@ -10,6 +10,7 @@
 #   WS_SOURCE WS_MOUNT WS_MODE WS_SSH WS_USB
 #   NET_MODE NET_LOG NET_MITM            (NET_ALLOW is an array)
 #   MNT_AGENT_FOLDER MNT_HISTORY MNT_MEMORY   (TTY_DEVICES is an array)
+#   SKILLS_STORE SKILLS_PROFILE               (SKILLS_INCLUDE is an array)
 #   HAVE_ONESHOT OS_AGENT OS_MODEL OS_PROMPT
 # The mount pair-lists (workspace.files, mounts.read_only/read_write) are read
 # directly from the file by mounts.sh via `jsoncfg.py rows`.
@@ -96,6 +97,16 @@ load_config() {
   MNT_HISTORY=$(cfg_path "mounts.history" "")
   MNT_MEMORY=$(cfg_path "mounts.memory" "")
   _read_list "mounts.tty_devices" TTY_DEVICES
+
+  # --- skills (optional; a bundle from the shared store) ---
+  # SKILLS_STORE stays empty unless a skills block is present, so a config without
+  # one carries no store requirement. profile/include default to empty.
+  SKILLS_STORE=""
+  SKILLS_PROFILE=$(cfg_scalar "skills.profile" "")
+  _read_list "skills.include" SKILLS_INCLUDE
+  if [[ "$CONFIG_PRESENT" == yes ]] && _json has "$JSON_CONFIG" "skills"; then
+    SKILLS_STORE=$(cfg_path "skills.store" "${XDG_DATA_HOME:-$HOME/.local/share}/skills")
+  fi
 
   # --- one-shot (optional; absence => interactive) ---
   HAVE_ONESHOT=no

@@ -87,6 +87,14 @@ if grep -q SECOND_RAN <<<"$out"; then bad "second run on same home refused" "$ou
 else grep -qi 'in use' <<<"$out" && ok "second run on same home refused" || bad "second run refused (wrong message)" "$out"; fi
 kill "$BGPID" 2>/dev/null; wait "$BGPID" 2>/dev/null
 
+echo "skills (read-only mount):"
+SK="$ROOT/store"; mkdir -p "$SK/demo"
+printf -- '---\nname: demo\n---\nbody\n' > "$SK/demo/SKILL.md"
+out=$(adev "{\"skills\":{\"store\":\"$SK\",\"include\":[\"demo\"]}}" -- bash -lc '
+  test -f /home/developer/.claude/skills/demo/SKILL.md || { echo NOSKILL; exit 0; }
+  echo X > /home/developer/.claude/skills/demo/x 2>/dev/null && echo WRITABLE || echo READONLY')
+grep -q READONLY <<<"$out" && ok "selected skill present and read-only inside" || bad "selected skill present and read-only inside" "$out"
+
 if [[ "$HAVE_NET" == yes ]]; then
   echo "network isolation:"
   out=$(adev '{"network":{"mode":"none"}}' -- bash -lc 'curl -sS -m 8 https://example.com >/dev/null 2>&1 && echo NET_OK || echo NET_BLOCKED')

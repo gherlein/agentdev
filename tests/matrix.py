@@ -44,6 +44,8 @@ def run(config, root, home):
     env = dict(os.environ)
     env["HOME"] = home
     env.pop("AGENTDEV_CONFIG", None)
+    env.pop("XDG_CONFIG_HOME", None)   # hermetic: skills profiles resolve under $HOME/.config
+    env.pop("XDG_DATA_HOME", None)
     proc = subprocess.run([AGENTDEV, "-c", path, "--dry-run"], cwd=root, env=env,
                           capture_output=True, text=True)
     return proc.returncode, proc.stdout + proc.stderr
@@ -215,6 +217,68 @@ def main():
                  "collides with a system path")
         negative("missing read_only source", {**base, "mounts": {"read_only": [{"src": P("nope"), "dest": "/x"}]}},
                  root, home, "not an existing directory")
+
+        print("G6  skills")
+        store = P("store")
+        def mkskill(st, name, body=True):
+            d = os.path.join(st, name)
+            os.makedirs(d, exist_ok=True)
+            if body:
+                with open(os.path.join(d, "SKILL.md"), "w") as fh:
+                    fh.write(f"---\nname: {name}\n---\nbody\n")
+            return d
+        mkskill(store, "git-ops")
+        mkskill(store, "documentation")
+        mkskill(store, "broken", body=False)   # a dir in the store with no SKILL.md
+        def mkprofile(name, text):
+            pdir = os.path.join(home, ".config", "agentdev", "profiles")
+            os.makedirs(pdir, exist_ok=True)
+            with open(os.path.join(pdir, name), "w") as fh:
+                fh.write(text)
+
+        def skline(o):
+            return line(o, "skills:")
+
+        positive("skills include", {**base, "skills": {"store": store, "include": ["git-ops", "documentation"]}},
+                 root, home, [
+            ("lists git-ops", lambda o: "git-ops" in skline(o)),
+            ("lists documentation", lambda o: "documentation" in skline(o)),
+        ])
+        mkprofile("bundle", "git-ops\n")
+        positive("skills dedup profile+include", {**base, "skills": {"store": store, "profile": "bundle",
+                 "include": ["git-ops"]}}, root, home, [
+            ("git-ops appears once", lambda o: skline(o).count("git-ops") == 1),
+        ])
+        mkprofile("withcomments", "# a comment\n\ngit-ops\n  # indented\n")
+        positive("skills profile comments ignored", {**base, "skills": {"store": store, "profile": "withcomments"}},
+                 root, home, [
+            ("git-ops resolved", lambda o: "git-ops" in skline(o)),
+            ("no comment text leaked", lambda o: "comment" not in skline(o) and "#" not in skline(o)),
+        ])
+        negative("skills unknown name", {**base, "skills": {"store": store, "include": ["nope"]}},
+                 root, home, "nope")
+        negative("skills missing profile", {**base, "skills": {"store": store, "profile": "ghost"}},
+                 root, home, "ghost")
+        negative("skills missing store", {**base, "skills": {"store": P("nostore"), "include": ["git-ops"]}},
+                 root, home, "store")
+        negative("skills non-conforming", {**base, "skills": {"store": store, "include": ["broken"]}},
+                 root, home, "broken")
+        # a requested name must be a valid skill name, not a path that traverses out of the store
+        os.makedirs(P("evil"), exist_ok=True)   # sibling of the store: store/../evil
+        with open(os.path.join(P("evil"), "SKILL.md"), "w") as fh:
+            fh.write("---\nname: evil\n---\n")
+        negative("skills name traversal", {**base, "skills": {"store": store, "include": ["../evil"]}},
+                 root, home, "valid skill name")
+        ah2 = P("ahome2")
+        hp = os.path.join(ah2, ".claude", "skills", "git-ops")
+        os.makedirs(hp, exist_ok=True)
+        with open(os.path.join(hp, "SKILL.md"), "w") as fh:
+            fh.write("---\nname: git-ops\n---\nhand-placed\n")
+        positive("skills fold hand-placed wins", {**base, "skills": {"store": store, "include": ["git-ops"]},
+                 "mounts": {"agent_folder": ah2}}, root, home, [
+            ("git-ops appears once", lambda o: skline(o).count("git-ops") == 1),
+            ("note hand-placed wins", lambda o: "hand-placed" in o.lower()),
+        ])
 
         print(f"\nMATRIX: {PASS} passed, {FAIL} failed")
         return 1 if FAIL else 0
