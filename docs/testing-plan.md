@@ -70,7 +70,7 @@ the `adev` helper). Checks:
 - **agent home** → a file placed in `agent_folder/.claude` is visible at `/home/developer/.claude`.
 - **skills** → a `skills.include` skill is present at `/home/developer/.claude/skills/<name>` and is
   **not writable** inside (the read-only mount holds against the agent).
-- **mcp** → an `mcp` config file is staged at `/home/developer/.agentdev-mcp/00-<name>.json` and is
+- **mcp** → an `mcp` config file is staged by index at `/home/developer/.agentdev-mcp/00.json` and is
   **not writable** inside (the read-only mount holds for MCP config too).
 - **single-instance** → a second run on the same `mounts.agent_folder` is refused.
 - **network none** → `curl` fails; **allowlist** → a denied host is blocked (and an allowed host

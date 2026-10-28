@@ -294,8 +294,9 @@ def main():
         positive("mcp one-shot flags", {**osbase, "mcp": [good]}, root, home, [
             ("strict flag", lambda o: "--strict-mcp-config" in podman_line(o)),
             ("mcp-config flag", lambda o: "--mcp-config" in podman_line(o)),
-            ("staged 00-good.json", lambda o: mcpdest("00-good.json") in podman_line(o)),
+            ("staged 00.json", lambda o: mcpdest("00.json") in podman_line(o)),
             ("plan line strict", lambda o: "strict" in line(o, "mcp:")),
+            ("plan line shows basename", lambda o: "good.json" in line(o, "mcp:")),
         ])
         positive("mcp deny-all", {**osbase, "mcp": []}, root, home, [
             ("strict flag", lambda o: "--strict-mcp-config" in podman_line(o)),
@@ -309,15 +310,27 @@ def main():
         a = mkmcp(P("mcpcfg", "a.json"))
         b = mkmcp(P("mcpcfg", "b.json"))
         positive("mcp multiple + order", {**osbase, "mcp": [a, b]}, root, home, [
-            ("00-a and 01-b ordered", lambda o: mcpdest("00-a.json") in podman_line(o)
-                and mcpdest("01-b.json") in podman_line(o)
-                and podman_line(o).index("00-a.json") < podman_line(o).index("01-b.json")),
+            ("00 and 01 ordered", lambda o: mcpdest("00.json") in podman_line(o)
+                and mcpdest("01.json") in podman_line(o)
+                and podman_line(o).index("00.json") < podman_line(o).index("01.json")),
         ])
         c1 = mkmcp(P("d1", "s.json"))
         c2 = mkmcp(P("d2", "s.json"))
-        positive("mcp basename collision", {**osbase, "mcp": [c1, c2]}, root, home, [
-            ("00-s.json present", lambda o: mcpdest("00-s.json") in podman_line(o)),
-            ("01-s.json present", lambda o: mcpdest("01-s.json") in podman_line(o)),
+        positive("mcp same-basename files", {**osbase, "mcp": [c1, c2]}, root, home, [
+            ("00.json present", lambda o: mcpdest("00.json") in podman_line(o)),
+            ("01.json present (distinct)", lambda o: mcpdest("01.json") in podman_line(o)),
+        ])
+        # a crafted or spaced basename must not reach the headless command (no injection,
+        # no arg-split): staged files are named by index only, no operator text.
+        eviln = mkmcp(P("evildir", "a;touch_PWNED.json"))
+        positive("mcp hostile basename neutralized", {**osbase, "mcp": [eviln]}, root, home, [
+            ("staged as index name", lambda o: mcpdest("00.json") in podman_line(o)),
+            ("basename not in command", lambda o: "touch_PWNED" not in podman_line(o) and "a;touch" not in podman_line(o)),
+        ])
+        spacen = mkmcp(P("spacedir", "my servers.json"))
+        positive("mcp spaced basename neutralized", {**osbase, "mcp": [spacen]}, root, home, [
+            ("staged as index name", lambda o: mcpdest("00.json") in podman_line(o)),
+            ("no split basename", lambda o: "00-my" not in podman_line(o) and "my servers" not in podman_line(o)),
         ])
         positive("mcp interactive env", {**base, "mcp": [good]}, root, home, [
             ("AGENTDEV_MCP_ARGS set", lambda o: "AGENTDEV_MCP_ARGS=" in podman_line(o)),

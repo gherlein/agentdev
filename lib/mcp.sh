@@ -29,7 +29,7 @@ _mcp_validate_file() {
   local f="$1"
   python3 -I -c 'import json,sys; json.load(open(sys.argv[1]))' "$f" 2>/dev/null \
     || { echo "Error: mcp '$f': not valid JSON" >&2; return 1; }
-  python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if isinstance(d.get("mcpServers"),dict) else 1)' "$f" \
+  python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if isinstance(d,dict) and isinstance(d.get("mcpServers"),dict) else 1)' "$f" \
     || { echo "Error: mcp '$f': missing a top-level \"mcpServers\" object" >&2; return 1; }
 }
 
@@ -68,23 +68,28 @@ collect_mcp() {
   while IFS= read -r f; do [[ -n "$f" ]] && files+=("$f"); done <<< "$out"
 
   # Strict is always on when an mcp block is present; [] yields strict with no servers.
+  # Staged files are named by index only (NN.json) - never from the operator's basename -
+  # so no operator-controlled text reaches MCP_FLAGS, the headless bash -lc command, or
+  # AGENTDEV_MCP_ARGS. That removes the injection/arg-split surface a crafted or spaced
+  # filename would otherwise open; the original basenames are kept only for the plan line.
   MCP_FLAGS="--strict-mcp-config"
-  local -a names=(); local i=0 cname
+  local -a cnames=() display=(); local i=0 cname
   for f in "${files[@]:-}"; do
     [[ -n "$f" ]] || continue
-    cname="$(printf '%02d-%s' "$i" "$(basename "$f")")"
-    names+=("$cname")
+    cname="$(printf '%02d.json' "$i")"
+    cnames+=("$cname")
+    display+=("$(basename "$f")")
     MCP_FLAGS+=" --mcp-config $MCP_DEST/$cname"
     i=$((i + 1))
   done
-  MCP_FILES_LIST="${names[*]:-}"
+  MCP_FILES_LIST="${display[*]:-}"
 
   [[ "$DRY_RUN" == yes || ${#files[@]} -eq 0 ]] && return 0
 
   MCP_STAGING="$(mktemp -d)"
   i=0
   for f in "${files[@]}"; do
-    _mcp_copy "$f" "$MCP_STAGING/${names[$i]}"
+    _mcp_copy "$f" "$MCP_STAGING/${cnames[$i]}"
     i=$((i + 1))
   done
   register_target "$MCP_DEST" "mcp (read-only config)"

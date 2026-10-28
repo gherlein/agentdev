@@ -112,6 +112,9 @@ printf '{"foo":{}}' > "$TMP/noms.json"
 checkn "missing mcpServers rejected" '( source "$REPO/lib/mcp.sh"; _mcp_validate_file "$TMP/noms.json" )'
 printf '{"mcpServers":[]}' > "$TMP/arrms.json"
 checkn "mcpServers-not-object rej."  '( source "$REPO/lib/mcp.sh"; _mcp_validate_file "$TMP/arrms.json" )'
+printf '[1,2,3]' > "$TMP/toparr.json"
+toperr="$( ( source "$REPO/lib/mcp.sh"; _mcp_validate_file "$TMP/toparr.json" ) 2>&1 1>/dev/null )"
+{ [ -n "$toperr" ] && ! echo "$toperr" | grep -q "Traceback"; } && ok || bad "top-level array rejected without traceback"
 # secrets never logged: the error names the path, not the file's contents
 printf '{"mcpServers":"SECRET_TOKEN_ABC"}' > "$TMP/leak.json"
 leakerr="$( ( source "$REPO/lib/mcp.sh"; _mcp_validate_file "$TMP/leak.json" ) 2>&1 1>/dev/null )"

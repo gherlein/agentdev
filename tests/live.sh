@@ -99,8 +99,8 @@ echo "mcp (read-only mount):"
 MC="$ROOT/mcpcfg"; mkdir -p "$MC"
 printf '{"mcpServers":{"demo":{"command":"true"}}}' > "$MC/m.json"
 out=$(adev "{\"mcp\":[\"$MC/m.json\"]}" -- bash -lc '
-  test -f /home/developer/.agentdev-mcp/00-m.json || { echo NOMCP; exit 0; }
-  echo X > /home/developer/.agentdev-mcp/00-m.json 2>/dev/null && echo WRITABLE || echo READONLY')
+  test -f /home/developer/.agentdev-mcp/00.json || { echo NOMCP; exit 0; }
+  echo X > /home/developer/.agentdev-mcp/00.json 2>/dev/null && echo WRITABLE || echo READONLY')
 grep -q READONLY <<<"$out" && ok "selected mcp config present and read-only inside" || bad "selected mcp config present and read-only inside" "$out"
 
 if [[ "$HAVE_NET" == yes ]]; then

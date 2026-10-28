@@ -154,10 +154,13 @@ active there unless the operator opts into `AGENTDEV_MCP_ARGS`.
 
 External input is the array of paths and the file contents. At the boundary:
 
-1. **Each path** is resolved with `resolve_file` (exists, is a regular file,
-   readable). A miss aborts the launch naming the path — in dry-run too, so a broken
-   config is caught with no container. Paths are only ever resolved and passed as
-   argv to `cp`/podman/`claude`; never interpolated into a shell string (MCP05).
+1. **Each path** is resolved and required to be a regular, readable file. A miss
+   aborts the launch naming the path — in dry-run too, so a broken config is caught
+   with no container. Host paths are passed as argv to `cp`/podman. The only mcp text
+   spliced into the headless `bash -lc` command is the set of `--mcp-config` flags,
+   and agentdev names the staged files by index (`NN.json`), not from the operator's
+   basename — so no operator-controlled string reaches the command, and a crafted or
+   spaced filename cannot inject or arg-split (MCP05).
 2. **Each file** is parsed as JSON and checked for a top-level `mcpServers` object.
    Malformed JSON or a missing/!object `mcpServers` aborts naming the file (MCP03 at
    the boundary; the CLAUDE.md "validate external inputs / fail closed, do not log"
@@ -174,9 +177,10 @@ External input is the array of paths and the file contents. At the boundary:
   copies a file outside the per-run staging dir. If an operator puts a literal secret
   in a file, it lands only in the per-run staging dir (cleaned on exit) and in the
   container the agent is already trusted to run in.
-- **MCP05 — injection.** Paths and container paths are passed as distinct argv
-  elements, never built into a `bash -c` string. The `--mcp-config` values are
-  container-side staging paths agentdev controls, not operator text.
+- **MCP05 — injection.** Staged files are named by index (`NN.json`), synthesized by
+  agentdev, so the `--mcp-config` values spliced into the headless command carry no
+  operator text — a crafted or spaced basename cannot inject into the `bash -lc`
+  string or arg-split the flag. Host paths are passed as argv to `cp`.
 - **MCP09 — shadow servers.** `--strict-mcp-config` is precisely the "only approved
   servers load" control; the one-shot path gets it unconditionally.
 - **Containment.** Read-only is a bind mount, not file perms, consistent with
@@ -202,3 +206,5 @@ External input is the array of paths and the file contents. At the boundary:
 - **Interactive is advisory** (`AGENTDEV_MCP_ARGS` + printed flags); enforcement is
   the one-shot path; `network.mode` is the backstop. Image `claude` wrapper deferred.
 - **Files validated** for well-formed `mcpServers` JSON; contents never logged.
+- **Staged by index** (`NN.json`), never by the operator's basename, so no
+  operator-controlled text reaches the headless command or `AGENTDEV_MCP_ARGS`.
