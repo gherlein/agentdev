@@ -12,7 +12,7 @@ set -euo pipefail
 SELFDIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 LIBDIR="$SELFDIR/lib"
 
-for m in config agents mounts net; do
+for m in config agents mounts net skills; do
   # shellcheck source=/dev/null
   source "$LIBDIR/$m.sh"
 done
@@ -167,6 +167,7 @@ launch() {
   # Build the mount plan.
   collect_mounts "$DIR_NAME"
   collect_ssh_mount
+  collect_skills
 
   MOUNTS_TMPFILE="$(mktemp)"
   printf "%b" "$MOUNTS_CONTENT" > "$MOUNTS_TMPFILE"
@@ -234,6 +235,7 @@ launch() {
     echo "agent home:    ${MNT_AGENT_FOLDER:-(ephemeral; discarded on exit)}"
     [[ -n "$MNT_HISTORY" ]] && echo "history:       $MNT_HISTORY"
     [[ -n "$MNT_MEMORY" ]]  && echo "memory:        $MNT_MEMORY"
+    skills_wanted && echo "skills:        ${SKILLS_LIST:-(none)} -> $SKILLS_DEST (ro)"
     echo "credentials:   from .env/.envrc in the workspace"
     if [[ "$NET_MODE" == allowlist ]]; then
       echo "network:       allowlist (${#NET_ALLOW[@]} rule(s), log=$NET_LOG, mitm=$NET_MITM) via proxy sidecar"
