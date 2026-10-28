@@ -69,6 +69,10 @@ skills_resolve() {
 
   for req in $prof_names "${SKILLS_INCLUDE[@]:-}"; do
     [[ -n "$req" ]] || continue
+    # A requested name is interpolated into a path below, so it must be a valid skill
+    # name - never a traversal like "../x" or a name with a slash.
+    [[ "$req" =~ $SKILLS_NAME_RE ]] || {
+      echo "Error: skills '$req': not a valid skill name (lowercase letters, digits, hyphens)" >&2; return 1; }
     if [[ "${seen[$req]:-}" == home ]]; then
       echo "Note: skills '$req': a hand-placed skill in the agent home wins over the store copy." >&2
       continue

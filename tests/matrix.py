@@ -263,6 +263,12 @@ def main():
                  root, home, "store")
         negative("skills non-conforming", {**base, "skills": {"store": store, "include": ["broken"]}},
                  root, home, "broken")
+        # a requested name must be a valid skill name, not a path that traverses out of the store
+        os.makedirs(P("evil"), exist_ok=True)   # sibling of the store: store/../evil
+        with open(os.path.join(P("evil"), "SKILL.md"), "w") as fh:
+            fh.write("---\nname: evil\n---\n")
+        negative("skills name traversal", {**base, "skills": {"store": store, "include": ["../evil"]}},
+                 root, home, "valid skill name")
         ah2 = P("ahome2")
         hp = os.path.join(ah2, ".claude", "skills", "git-ops")
         os.makedirs(hp, exist_ok=True)
