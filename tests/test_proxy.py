@@ -36,4 +36,89 @@ ok(not proxy.decide(r, "example.com", 443, None)[0], "path-only rule denies CONN
 
 # not listed
 ok(not proxy.decide(r, "evil.com", 443, None)[0], "unlisted host denied")
+
+
+# --- plain-HTTP keep-alive: every request upstream must be checked and origin-form ----------
+# A keep-alive client (LiteLLM's OpenAI/Anthropic clients) reuses one proxied connection. The
+# proxy must not relay a second absolute-form request raw: upstream would 404 it, and it would
+# skip the allowlist's path rules. The fake upstream behaves like a real HTTP/1.1 server: it
+# keeps the connection open unless the request says "Connection: close".
+import socket, threading, time
+
+# Every request head the upstream saw, across all connections.
+received = []
+
+def _read_head(sock):
+    data = b""
+    while b"\r\n\r\n" not in data:
+        chunk = sock.recv(1)
+        if not chunk:
+            return None
+        data += chunk
+    return data
+
+def _upstream_conn(conn):
+    conn.settimeout(5)
+    try:
+        while True:
+            head = _read_head(conn)
+            if head is None:
+                return
+            received.append(head)
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+            if b"connection: close" in head.lower():
+                return
+    except OSError:
+        return
+    finally:
+        conn.close()
+
+upstream = socket.socket(); upstream.bind(("127.0.0.1", 0)); upstream.listen(4)
+up_port = upstream.getsockname()[1]
+def _serve():
+    while True:
+        try:
+            c, _ = upstream.accept()
+        except OSError:
+            return
+        threading.Thread(target=_upstream_conn, args=(c,), daemon=True).start()
+threading.Thread(target=_serve, daemon=True).start()
+
+proxy._rules = rules("127.0.0.1:%d\n" % up_port)
+client, proxy_side = socket.socketpair()
+client.settimeout(5)
+threading.Thread(target=proxy.handle, args=(proxy_side,), daemon=True).start()
+
+def _req(path):
+    return ("GET http://127.0.0.1:%d%s HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n"
+            "Proxy-Connection: keep-alive\r\nConnection: keep-alive\r\n\r\n"
+            % (up_port, path, up_port)).encode()
+
+client.sendall(_req("/one"))
+first = b""
+while not first.endswith(b"ok"):
+    chunk = client.recv(4096)
+    if not chunk:
+        break
+    first += chunk
+ok(first.startswith(b"HTTP/1.1 200"), "first keep-alive request answered")
+try:
+    client.sendall(_req("/two"))
+    # Either an answer or EOF; what matters is what upstream saw.
+    client.recv(4096)
+except OSError:
+    pass
+client.close()
+deadline = time.monotonic() + 1.0
+# Let a raw-relayed second request land before inspecting what upstream saw.
+while len(received) < 2 and time.monotonic() < deadline:
+    time.sleep(0.05)
+
+lines = [h.split(b"\r\n", 1)[0] for h in received]
+ok(lines and lines[0] == b"GET /one HTTP/1.1", "first request forwarded in origin form")
+ok(all(not ln.split(b" ")[1].startswith(b"http://") for ln in lines),
+   "no absolute-form request ever reaches upstream (got %r)" % lines)
+ok(b"connection: close" in received[0].lower(), "forwarded request carries Connection: close")
+ok(b"keep-alive" not in received[0].lower(), "keep-alive / Proxy-Connection headers stripped")
+upstream.close()
 print("ALL PROXY LOGIC TESTS PASSED")

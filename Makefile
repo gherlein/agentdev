@@ -29,9 +29,10 @@ digest: ## Print IMAGE's pin-by-digest reference (set it as the default IMAGE)
 	@podman inspect --format '{{index .RepoDigests 0}}' $(IMAGE)
 
 .PHONY: test
-test: ## Run the offline suite: smoke + option-permutation matrix (docs/testing-plan.md)
+test: ## Run the offline suite: smoke + option-permutation matrix + proxy (docs/testing-plan.md)
 	./tests/smoke.sh
 	python3 ./tests/matrix.py
+	python3 ./tests/test_proxy.py
 
 .PHONY: run-tests
 run-tests: test ## Alias for `test` (the default offline suite; CI entrypoint)

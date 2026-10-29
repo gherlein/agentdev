@@ -28,7 +28,7 @@ and `-- command`), so each test writes a config and runs `agentdev -c <cfg> …`
 
 ## Tier A — offline plan tests (the bulk)
 
-`tests/smoke.sh` and `tests/matrix.py`, run by `make test` / `make run-tests`. Each case writes a
+`tests/smoke.sh`, `tests/matrix.py`, and `tests/test_proxy.py`, run by `make test` / `make run-tests`. Each case writes a
 config and runs `agentdev -c <cfg> --dry-run` in a throwaway HOME + temp workspace. No containers,
 no network, no real credentials, so it runs exhaustively in CI with no podman. We assert
 **invariants** on the dry-run output (properties), not golden text.
@@ -54,6 +54,13 @@ no network, no real credentials, so it runs exhaustively in CI with no podman. W
   - **G8** host_login (plan line when `true`, absent when `false`/omitted, `CLAUDE_CONFIG_DIR`
     honored, the live credentials path never in the podman command, the token never printed, and
     the fail-closed negatives: missing login, non-claude agent).
+
+- **`tests/test_proxy.py`** — the egress proxy (`image/proxy.py`): allowlist rule parsing and
+  matching (host, wildcard, port, path prefix), plus a socket-level keep-alive test. A client
+  sends two plain-HTTP requests on one proxied connection to a fake keep-alive upstream, and the
+  test asserts that upstream only ever sees origin-form requests carrying `Connection: close`.
+  Without this, a second request on the connection reaches upstream raw: LiteLLM answers it with
+  a 404, and it skips the path rules.
 
 ### Negative suite (must exit non-zero with a specific message)
 
