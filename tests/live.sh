@@ -55,6 +55,14 @@ PY
 
 echo "== Tier B: live enforcement (image: $IMAGE) =="
 
+echo "login-shell toolchain:"
+# Every one-shot runs through `bash -lc`, and Debian's /etc/profile resets PATH, so the image's
+# toolchains must survive a login shell or agents and harness commands start without them.
+out=$(adev '{}' -- bash -lc 'for t in go node npm claude omp pi; do command -v "$t" >/dev/null || echo "MISSING:$t"; done; echo DONE')
+grep -q DONE <<<"$out" && ! grep -q MISSING <<<"$out" \
+  && ok "go, node, npm and every agent are on PATH in a login shell" \
+  || bad "go, node, npm and every agent are on PATH in a login shell" "$(grep MISSING <<<"$out")"
+
 echo "workspace mode:"
 out=$(adev '{"workspace":{"mode":"ro"}}' -- bash -lc 'touch /ws/x 2>/dev/null && echo WRITABLE || echo READONLY')
 grep -q READONLY <<<"$out" && ok "ro workspace blocks writes" || bad "ro workspace blocks writes" "$out"
