@@ -89,10 +89,16 @@ setup_network() {
     proxy_env+=(-e PROXY_MITM=1 -e PROXY_CA_CERT=/etc/agentdev/ca.crt -e PROXY_CA_KEY=/etc/agentdev/ca.key)
   fi
 
+  # Run the proxy as the host user, like the agent: otherwise the entrypoint drops it to the
+  # image's developer, an unmapped subuid on the host that cannot write the egress log into
+  # the host-owned agent folder (and the proxy swallows that write error).
+  local proxy_userns=()
+  [[ "$(uname -s)" == "Linux" ]] && proxy_userns=("--userns=keep-id")
+
   podman network create --internal --label "agentdev.net=$id" "$NET_INT" >/dev/null
   podman network create          --label "agentdev.net=$id" "$NET_EXT" >/dev/null
   if ! podman run -d --pull=missing --name "$PROXY_NAME" --label "agentdev.proxy=$id" --label "agentdev.net=$id" \
-         --network "$NET_INT" --network "$NET_EXT" \
+         "${proxy_userns[@]}" --network "$NET_INT" --network "$NET_EXT" \
          "${proxy_vols[@]}" "${proxy_env[@]}" "$IMAGE" python3 /usr/local/bin/agentdev-proxy.py >/dev/null; then
     echo "Error: failed to start egress proxy sidecar." >&2
     teardown_network

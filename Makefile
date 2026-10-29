@@ -6,7 +6,7 @@ GO_VERSION ?= 1.25.0
 PREFIX     ?= $(HOME)/.local
 BINDIR     := $(PREFIX)/bin
 
-SHELLS  := agentdev $(wildcard lib/*.sh) image/entrypoint.sh scripts/release.sh tests/smoke.sh tests/live.sh tests/live-agent.sh tests/live-containment.sh
+SHELLS  := agentdev $(wildcard lib/*.sh) image/entrypoint.sh scripts/release.sh tests/smoke.sh tests/live.sh tests/live-agent.sh tests/live-containment.sh tests/cleanup.sh
 PYFILES := lib/jsoncfg.py image/proxy.py tests/matrix.py tests/test_proxy.py
 
 .DEFAULT_GOAL := help
