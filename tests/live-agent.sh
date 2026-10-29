@@ -46,12 +46,10 @@ fi
 
 ROOT="$(mktemp -d /tmp/agentdev-live-agent.XXXX)"
 chmod 700 "$ROOT"
+. "$(dirname "${BASH_SOURCE[0]}")/cleanup.sh"
+PROXIES_BEFORE="$(agentdev_proxy_ids)"
 cleanup() {
-  local lbl
-  for lbl in agentdev.home agentdev.proxy; do
-    timeout 30 podman ps -a --filter "label=$lbl" -q 2>/dev/null \
-      | xargs -r timeout 30 podman rm -f >/dev/null 2>&1
-  done
+  remove_own_containers "$ROOT" "$PROXIES_BEFORE"
   rm -rf "$ROOT"
 }
 trap cleanup EXIT

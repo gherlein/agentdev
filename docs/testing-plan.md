@@ -90,11 +90,22 @@ the `adev` helper). Checks:
   credentials, no mount-point stub is left behind; over a home with its own credentials, the host
   login wins and the home's file is left byte-identical.
 - **single-instance** → a second run on the same `mounts.agent_folder` is refused.
+- **egress log** → with `network.log: true`, a denied CONNECT is recorded in
+  `<agent_folder>/agentdev-egress.log`. The proxy sidecar runs as the host user (keep-id), so it
+  can write there. This needs no internet: the denial is logged before any upstream connect.
 - **network none** → `curl` fails; **allowlist** → a denied host is blocked (and an allowed host
   reachable where the environment has upstream egress).
+- **scoped cleanup** → the test's teardown removes its own leftover containers, and leaves the
+  operator's other agentdev containers running.
 
-Gate on `command -v podman` + the image present; skip (not fail) otherwise. The EXIT trap
-force-removes any container the run left (labelled `agentdev.home` / `agentdev.proxy`).
+Gate on `command -v podman` + the image present; skip (not fail) otherwise. On exit, every live
+tier calls `remove_own_containers` from `tests/cleanup.sh`. It removes only what that run
+started:
+
+- agent containers whose `agentdev.home` label is under the test's `$ROOT`;
+- proxy sidecars that did not exist when the test began.
+
+It never touches the operator's own agentdev sessions.
 
 ## Tier C — live agent persistence (gated, real model cost)
 

@@ -30,9 +30,9 @@ timeout 8 bash -c 'exec 3<>/dev/tcp/example.com/443' 2>/dev/null && HAVE_NET=yes
 # We deliberately do NOT override $HOME: rootless podman keeps its image store there.
 # The per-case config isolates the workspace and the agent home under $ROOT.
 ROOT="$(mktemp -d /tmp/agentdev-live.XXXX)"
-trap 'podman ps -a --filter label=agentdev.proxy -q 2>/dev/null | xargs -r podman rm -f >/dev/null 2>&1;
-      podman ps -a --filter label=agentdev.home -q 2>/dev/null | xargs -r podman rm -f >/dev/null 2>&1;
-      rm -rf "$ROOT"' EXIT
+. "$(dirname "${BASH_SOURCE[0]}")/cleanup.sh"
+PROXIES_BEFORE="$(agentdev_proxy_ids)"
+trap 'remove_own_containers "$ROOT" "$PROXIES_BEFORE"; rm -rf "$ROOT"' EXIT
 WS="$ROOT/ws"; mkdir -p "$WS"
 
 # adev EXTRA_JSON ARGS... - write a config (EXTRA_JSON merged over a base that mounts
@@ -156,6 +156,17 @@ grep -q HOSTWINS <<<"$out" && ok "explicit host_login wins over the home's own c
   && ok "the home's own credentials are left byte-identical" \
   || bad "the home's own credentials are left byte-identical" "$(cat "$AH3/.claude/.credentials.json")"
 
+echo "egress log (network.log):"
+# A denied CONNECT is logged before any upstream connection, so this needs no internet.
+AH4="$ROOT/home-egress"
+adev "{\"network\":{\"mode\":\"allowlist\",\"allow\":[\"api.anthropic.com\"],\"log\":true},\"mounts\":{\"agent_folder\":\"$AH4\"}}" \
+  -- bash -lc 'curl -sS -m 8 https://denied.example.org >/dev/null 2>&1; true' >/dev/null
+if grep -qP '\tDENY\tCONNECT\tdenied\.example\.org:443' "$AH4/agentdev-egress.log" 2>/dev/null; then
+  ok "egress log written into the agent folder (DENY recorded)"
+else
+  bad "egress log written into the agent folder (DENY recorded)" "$(ls -la "$AH4" 2>&1)"
+fi
+
 if [[ "$HAVE_NET" == yes ]]; then
   echo "network isolation:"
   out=$(adev '{"network":{"mode":"none"}}' -- bash -lc 'curl -sS -m 8 https://example.com >/dev/null 2>&1 && echo NET_OK || echo NET_BLOCKED')
@@ -172,6 +183,24 @@ else
   skip "network isolation (host offline)"
   skip "network allowlist (host offline)"
 fi
+
+echo "test cleanup is scoped (never touches the operator's own sessions):"
+# A bystander stands in for an agentdev session the operator is running right now: its home is
+# outside $ROOT and its proxy existed before this test started.
+BYSTANDER_HOME="$(mktemp -d /tmp/agentdev-bystander.XXXX)"
+by_home=$(podman run -d --label "agentdev.home=$BYSTANDER_HOME" --entrypoint sleep "$IMAGE" 120)
+by_proxy=$(podman run -d --label agentdev.proxy=bystander --entrypoint sleep "$IMAGE" 120)
+BEFORE_SCOPE="$(agentdev_proxy_ids)"
+own_home=$(podman run -d --label "agentdev.home=$ROOT/scoped-home" --entrypoint sleep "$IMAGE" 120)
+own_proxy=$(podman run -d --label agentdev.proxy=own --entrypoint sleep "$IMAGE" 120)
+remove_own_containers "$ROOT" "$BEFORE_SCOPE"
+alive() { podman container exists "$1"; }
+alive "$by_home" && alive "$by_proxy" && ok "operator's own agentdev containers survive test cleanup" \
+  || bad "operator's own agentdev containers survive test cleanup" "bystander removed"
+! alive "$own_home" && ! alive "$own_proxy" && ok "the test's own leftover containers are removed" \
+  || bad "the test's own leftover containers are removed" "own container still present"
+podman rm -f "$by_home" "$by_proxy" "$own_home" "$own_proxy" >/dev/null 2>&1
+rmdir "$BYSTANDER_HOME"
 
 echo
 echo "LIVE: $PASS passed, $FAIL failed, $SKIP skipped"
