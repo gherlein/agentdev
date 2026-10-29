@@ -177,6 +177,7 @@ launch() {
     rm -f "${MOUNTS_TMPFILE:-}"
     rm -rf "${SKILLS_STAGING:-}"
     rm -rf "${MCP_STAGING:-}"
+    rm -f "${CIDFILE:-}"
     host_login_cleanup
   }
   trap cleanup_run EXIT
@@ -296,12 +297,31 @@ launch() {
     echo "mcp: ${MCP_FILES_LIST:-deny-all} staged read-only at $MCP_DEST; run 'claude \$AGENTDEV_MCP_ARGS ...' to use the allowlist." >&2
   fi
 
+  # A signal to agentdev (timeout, kill, a wrapper's Ctrl-C) must stop the container. podman
+  # never sees agentdev's signal, so the agent would keep running and, still attached, pin the
+  # allowlist network. podman therefore runs as a waited-on child (stdin passed explicitly,
+  # since an async command's stdin is otherwise /dev/null), its container id goes to a
+  # cidfile, and the handlers remove the container before the EXIT trap tears the rest down.
+  # The cidfile is added only here, so the dry-run plan is unchanged.
+  CIDFILE="$(mktemp -u)"
+  stop_container() {
+    [[ -s "$CIDFILE" ]] && podman rm -f -t 0 --cidfile "$CIDFILE" >/dev/null 2>&1
+    return 0
+  }
+  trap 'stop_container; exit 130' INT
+  trap 'stop_container; exit 143' TERM
+  trap 'stop_container; exit 129' HUP
+
+  local podman_pid podman_rc=0
   # Close the home-lock fd in the podman child so a detached container cannot pin it.
   if [[ -n "${HOME_LOCK_FD:-}" ]]; then
-    podman "${PODMAN_ARGS[@]}" {HOME_LOCK_FD}>&-
+    podman "${PODMAN_ARGS[0]}" --cidfile "$CIDFILE" "${PODMAN_ARGS[@]:1}" {HOME_LOCK_FD}>&- <&0 &
   else
-    podman "${PODMAN_ARGS[@]}"
+    podman "${PODMAN_ARGS[0]}" --cidfile "$CIDFILE" "${PODMAN_ARGS[@]:1}" <&0 &
   fi
+  podman_pid=$!
+  wait "$podman_pid" || podman_rc=$?
+  return "$podman_rc"
 }
 
 # extract_config_flag - pull -c/--config out of the arg stream from any position.
