@@ -165,6 +165,30 @@ def _read_headers(sock):
     return data
 
 
+# Hop-by-hop headers that negotiate connection reuse; replaced by "Connection: close".
+_REUSE_HEADERS = (b"connection", b"proxy-connection", b"keep-alive")
+
+
+def _origin_request(method, path, header_block):
+    """Rebuild an absolute-form request head as origin form with Connection: close.
+
+    After the head, the client's bytes are relayed raw, so a second request on a kept-alive
+    connection would reach upstream unchecked and still in absolute form. Forcing close makes
+    the upstream end the connection after one response; the client must reconnect, and its
+    next request comes back through handle() and the allowlist.
+    """
+    kept = []
+    for line in header_block.split(b"\r\n"):
+        if not line:
+            continue
+        name = line.split(b":", 1)[0].strip().lower()
+        if name in _REUSE_HEADERS:
+            continue
+        kept.append(line)
+    head = [("%s %s HTTP/1.1" % (method, path)).encode("latin1")] + kept + [b"Connection: close"]
+    return b"\r\n".join(head) + b"\r\n\r\n"
+
+
 def handle(client):
     try:
         first = _recv_line(client)
@@ -199,7 +223,6 @@ def handle(client):
 
         # Absolute-form HTTP request: GET http://host/path HTTP/1.1
         rest = _read_headers(client)
-        full = first + rest
         scheme, _, remainder = target.partition("://")
         hostport, _, path = remainder.partition("/")
         path = "/" + path
@@ -211,10 +234,7 @@ def handle(client):
             client.sendall(b"HTTP/1.1 403 Forbidden\r\n\r\n")
             return
         upstream = socket.create_connection((host, port), timeout=30)
-        # rewrite request line to origin form
-        origin = "%s %s %s" % (method, path, "HTTP/1.1")
-        body = full.split(b"\r\n", 1)[1] if b"\r\n" in full else b""
-        upstream.sendall(origin.encode("latin1") + b"\r\n" + body)
+        upstream.sendall(_origin_request(method, path, rest))
         t = threading.Thread(target=_pipe, args=(upstream, client), daemon=True)
         t.start()
         _pipe(client, upstream)
