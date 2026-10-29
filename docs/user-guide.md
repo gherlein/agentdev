@@ -144,6 +144,13 @@ To keep a secret out of your repo, put it in a private host file and inject it w
 - `allowlist` — only `network.allow` destinations, via a filtering proxy sidecar; optional egress
   `log` and per-URL `mitm`. Add your model's host (e.g. `api.anthropic.com`) to `allow`.
 
+Under `allowlist`, host names must be **fully qualified**: no LAN shortcuts. Write
+`dgx1.example.lan`, never `dgx1`, and use the same name in `network.allow` and in the URL the agent
+calls (e.g. `ANTHROPIC_BASE_URL`). The proxy sidecar resolves names on a podman bridge network that
+does not carry your host's DNS `search` domain, so a short name fails, and the agent sees only an
+empty reply. The allowlist also matches names as strings, so `dgx1` and `dgx1.example.lan` are
+different entries.
+
 The egress log (`network.log`) is written into the agent home, so set `mounts.agent_folder` to keep
 it. For an untrusted task, combine `allowlist` with `workspace.mode: "ro"` and `workspace.ssh: false`
 (see [`examples/isolated`](../examples/isolated)).

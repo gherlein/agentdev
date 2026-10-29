@@ -10,6 +10,9 @@ Groups:
   G3  mounts (agent_folder, read_only/read_write, history/memory, tty_devices)
   G4  network (off / none / allowlist)
   G5  negatives (fail closed)
+  G6  skills
+  G7  mcp
+  G8  host_login (stage the host claude login; never mount the live file)
 
 Run directly or via `make test`. Exit status is non-zero if any case fails.
 """
@@ -37,7 +40,7 @@ def make_fixtures(root):
     return home, ws
 
 
-def run(config, root, home):
+def run(config, root, home, extra_env=None, dry=True):
     path = os.path.join(root, "case.json")
     with open(path, "w") as fh:
         json.dump(config, fh)
@@ -46,8 +49,10 @@ def run(config, root, home):
     env.pop("AGENTDEV_CONFIG", None)
     env.pop("XDG_CONFIG_HOME", None)   # hermetic: skills profiles resolve under $HOME/.config
     env.pop("XDG_DATA_HOME", None)
-    proc = subprocess.run([AGENTDEV, "-c", path, "--dry-run"], cwd=root, env=env,
-                          capture_output=True, text=True)
+    env.pop("CLAUDE_CONFIG_DIR", None)   # hermetic: host_login resolves under $HOME/.claude
+    env.update(extra_env or {})
+    argv = [AGENTDEV, "-c", path] + (["--dry-run"] if dry else [])
+    proc = subprocess.run(argv, cwd=root, env=env, capture_output=True, text=True)
     return proc.returncode, proc.stdout + proc.stderr
 
 
@@ -73,8 +78,8 @@ def podman_line(out):
     return line(out, "podman run")
 
 
-def positive(desc, cfg, root, home, checks):
-    rc, out = run(cfg, root, home)
+def positive(desc, cfg, root, home, checks, extra_env=None):
+    rc, out = run(cfg, root, home, extra_env)
     ok = rc == 0
     check(f"{desc}: exits 0", ok, "" if ok else out)
     if not ok:
@@ -84,8 +89,8 @@ def positive(desc, cfg, root, home, checks):
         check(f"{desc}: {sub}", r, out if not r else "")
 
 
-def negative(desc, cfg, root, home, must):
-    rc, out = run(cfg, root, home)
+def negative(desc, cfg, root, home, must, extra_env=None):
+    rc, out = run(cfg, root, home, extra_env)
     ok = rc != 0 and must in out
     check(f"{desc}: fails ('{must}')", ok, out if not ok else "")
 
@@ -341,6 +346,52 @@ def main():
                  "mcp": [good]}, root, home, "claude agent")
         negative("mcp missing file", {**osbase, "mcp": [P("nope.json")]}, root, home,
                  "not an existing readable file")
+
+        print("G8  host_login")
+        def mklogin(cfgdir):
+            os.makedirs(cfgdir, exist_ok=True)
+            path = os.path.join(cfgdir, ".credentials.json")
+            with open(path, "w") as fh:
+                json.dump({"claudeAiOauth": {"accessToken": "FAKE-SECRET-TOKEN"}}, fh)
+            return path
+        login = mklogin(os.path.join(home, ".claude"))
+        positive("host_login interactive", {**base, "host_login": True}, root, home, [
+            ("plan line", lambda o: "host claude login" in line(o, "credentials:")),
+            ("source path in plan", lambda o: login in line(o, "credentials:")),
+            # only a per-run copy is ever mounted, never the live file
+            ("live source never mounted", lambda o: login not in podman_line(o)),
+            ("token never printed", lambda o: "FAKE-SECRET-TOKEN" not in o),
+        ])
+        positive("host_login one-shot claude", {**osbase, "host_login": True}, root, home, [
+            ("plan line", lambda o: "host claude login" in line(o, "credentials:")),
+        ])
+        positive("host_login false", {**base, "host_login": False}, root, home, [
+            ("no host login", lambda o: "host claude login" not in o),
+            ("workspace credentials", lambda o: ".env/.envrc" in line(o, "credentials:")),
+        ])
+        positive("host_login absent", dict(base), root, home, [
+            ("no host login", lambda o: "host claude login" not in o),
+        ])
+        alt = mklogin(P("altcfg"))
+        positive("host_login honors CLAUDE_CONFIG_DIR", {**base, "host_login": True}, root, home, [
+            ("alt source in plan", lambda o: alt in line(o, "credentials:")),
+        ], extra_env={"CLAUDE_CONFIG_DIR": P("altcfg")})
+        os.makedirs(P("nologin"), exist_ok=True)
+        negative("host_login missing login", {**base, "host_login": True}, root, home,
+                 "no claude login found", extra_env={"CLAUDE_CONFIG_DIR": P("nologin")})
+        negative("host_login rejects non-claude", {**base, "host_login": True,
+                 "one-shot": {"agent": "omp", "prompt": "task.md"}}, root, home,
+                 "host_login requires the claude agent")
+        # A real (non-dry) launch that fails at the login check, after skills and mcp have
+        # staged their copies: the failure exits before podman, and must leave nothing in
+        # TMPDIR (mcp configs can carry API keys in their env fields).
+        os.makedirs(P("leaktmp"), exist_ok=True)
+        rc, out = run({**base, "host_login": True, "mcp": [good]}, root, home, dry=False,
+                      extra_env={"CLAUDE_CONFIG_DIR": P("nologin"), "TMPDIR": P("leaktmp")})
+        check("host_login missing login (real run): fails",
+              rc != 0 and "no claude login found" in out, out)
+        check("host_login missing login (real run): no staging left in TMPDIR",
+              os.listdir(P("leaktmp")) == [], "left: " + " ".join(os.listdir(P("leaktmp"))))
 
         print(f"\nMATRIX: {PASS} passed, {FAIL} failed")
         return 1 if FAIL else 0

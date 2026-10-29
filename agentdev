@@ -12,7 +12,7 @@ set -euo pipefail
 SELFDIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 LIBDIR="$SELFDIR/lib"
 
-for m in config agents mounts net skills mcp; do
+for m in config agents mounts net skills mcp hostlogin; do
   # shellcheck source=/dev/null
   source "$LIBDIR/$m.sh"
 done
@@ -137,6 +137,9 @@ launch() {
     if [[ "$MCP_PRESENT" == yes && "$OS_AGENT" != claude ]]; then
       echo "Error: an mcp block requires the claude agent (omp/pi have no --mcp-config surface); remove mcp or set one-shot.agent=claude." >&2; exit 1
     fi
+    if [[ "$HOST_LOGIN" == true && "$OS_AGENT" != claude ]]; then
+      echo "Error: host_login requires the claude agent (it stages claude's login); remove host_login or set one-shot.agent=claude." >&2; exit 1
+    fi
     if [[ ${#COMMAND[@]} -gt 0 ]]; then
       echo "Error: a one-shot run cannot be combined with a '-- command'." >&2; exit 1
     fi
@@ -166,11 +169,24 @@ launch() {
     fi
   fi
 
+  # Clean up on any exit (tear down the network, drop the temp file and staged copies).
+  # Installed before the collectors: they stage copies (skills, mcp configs that may carry
+  # API keys, the host login) and later ones can fail closed, which must not leak earlier ones.
+  cleanup_run() {
+    teardown_network
+    rm -f "${MOUNTS_TMPFILE:-}"
+    rm -rf "${SKILLS_STAGING:-}"
+    rm -rf "${MCP_STAGING:-}"
+    host_login_cleanup
+  }
+  trap cleanup_run EXIT
+
   # Build the mount plan.
   collect_mounts "$DIR_NAME"
   collect_ssh_mount
   collect_skills
   collect_mcp
+  collect_host_login
 
   # Build the one-shot headless command now that MCP_FLAGS is known. Load the workspace
   # .env/.envrc, then run the agent headless on the prompt with any mcp flags spliced in.
@@ -205,15 +221,6 @@ launch() {
     TTY=(-i); [[ -t 0 && -t 1 ]] && TTY=(-i -t)
   fi
 
-  # Clean up on any exit (tear down the network, drop the temp file).
-  cleanup_run() {
-    teardown_network
-    rm -f "${MOUNTS_TMPFILE:-}"
-    rm -rf "${SKILLS_STAGING:-}"
-    rm -rf "${MCP_STAGING:-}"
-  }
-  trap cleanup_run EXIT
-
   # Egress isolation (off | none | allowlist).
   setup_network
 
@@ -226,6 +233,7 @@ launch() {
     "${HOME_MOUNTS[@]}"
     "${SKILLS_MOUNT[@]}"
     "${MCP_MOUNT[@]}"
+    "${HOST_LOGIN_MOUNT[@]}"
     "${SSH_MOUNT[@]}" "${SSH_AGENT[@]}"
     "${VOLUME_MOUNTS[@]}"
     "${PROMPT_MOUNT[@]}"
@@ -264,7 +272,11 @@ launch() {
         echo "mcp:           (deny-all; strict, no servers)"
       fi
     fi
-    echo "credentials:   from .env/.envrc in the workspace"
+    if host_login_wanted; then
+      echo "credentials:   host claude login ($HOST_LOGIN_SRC -> per-run copy at $HOST_LOGIN_DEST, rw; discarded on exit)"
+    else
+      echo "credentials:   from .env/.envrc in the workspace"
+    fi
     if [[ "$NET_MODE" == allowlist ]]; then
       echo "network:       allowlist (${#NET_ALLOW[@]} rule(s), log=$NET_LOG, mitm=$NET_MITM) via proxy sidecar"
       printf '  allow:       %s\n' "${NET_ALLOW[@]}"

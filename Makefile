@@ -45,7 +45,7 @@ test-live: ## Tier B: launch real containers to verify enforcement (needs podman
 	./tests/live.sh
 
 .PHONY: test-live-agent
-test-live-agent: ## Tier C: drive a real agent to verify agent-home persistence (needs ANTHROPIC_API_KEY; real model cost)
+test-live-agent: ## Tier C: drive a real agent to verify agent-home persistence (host claude login or ANTHROPIC_API_KEY; real model cost)
 	./tests/live-agent.sh
 
 .PHONY: test-live-containment

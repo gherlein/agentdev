@@ -60,6 +60,7 @@ SCHEMA = {
         "include": "str-list",
     },
     "mcp": "str-list",
+    "host_login": "bool",
 }
 
 # Keys from earlier config versions, so a stale file gets a pointed message.
