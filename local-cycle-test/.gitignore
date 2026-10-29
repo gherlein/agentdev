@@ -1,0 +1,4 @@
+# Runtime output of orchestrate.sh: the generated project, per-run logs, and live omp homes.
+/project/
+/runs/
+/homes/
