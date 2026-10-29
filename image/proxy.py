@@ -189,6 +189,21 @@ def _origin_request(method, path, header_block):
     return b"\r\n".join(head) + b"\r\n\r\n"
 
 
+# Seconds allowed to establish an upstream connection.
+UPSTREAM_CONNECT_TIMEOUT = 30
+
+
+def _connect_upstream(host, port):
+    """Connect with a bounded connect time, then block without a read timeout.
+
+    create_connection's timeout also applies to every later recv, and a model can legitimately
+    stay silent for minutes before its first token; a read timeout dropped those requests.
+    """
+    sock = socket.create_connection((host, port), timeout=UPSTREAM_CONNECT_TIMEOUT)
+    sock.settimeout(None)
+    return sock
+
+
 def handle(client):
     try:
         first = _recv_line(client)
@@ -214,7 +229,7 @@ def handle(client):
             if not allowed:
                 client.sendall(b"HTTP/1.1 403 Forbidden\r\n\r\n")
                 return
-            upstream = socket.create_connection((host, port), timeout=30)
+            upstream = _connect_upstream(host, port)
             client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             t = threading.Thread(target=_pipe, args=(upstream, client), daemon=True)
             t.start()
@@ -233,7 +248,7 @@ def handle(client):
         if not allowed:
             client.sendall(b"HTTP/1.1 403 Forbidden\r\n\r\n")
             return
-        upstream = socket.create_connection((host, port), timeout=30)
+        upstream = _connect_upstream(host, port)
         upstream.sendall(_origin_request(method, path, rest))
         t = threading.Thread(target=_pipe, args=(upstream, client), daemon=True)
         t.start()
@@ -312,7 +327,7 @@ def handle_connect_mitm(client, host, port):
         tls_client.close()
         return
     up = ssl.create_default_context().wrap_socket(
-        socket.create_connection((host, port), timeout=30), server_hostname=host)
+        _connect_upstream(host, port), server_hostname=host)
     up.sendall(req)
     t = threading.Thread(target=_pipe, args=(up, tls_client), daemon=True)
     t.start()
