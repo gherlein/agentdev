@@ -121,4 +121,47 @@ ok(all(not ln.split(b" ")[1].startswith(b"http://") for ln in lines),
 ok(b"connection: close" in received[0].lower(), "forwarded request carries Connection: close")
 ok(b"keep-alive" not in received[0].lower(), "keep-alive / Proxy-Connection headers stripped")
 upstream.close()
+
+
+# --- a slow upstream must not be cut off: the timeout bounds the connect only ----------------
+# A large local model can take minutes before its first response byte. A read timeout on the
+# upstream socket made the proxy drop every such request (the agent saw ECONNRESET).
+SLOW_SECONDS = 1.5
+proxy.UPSTREAM_CONNECT_TIMEOUT = 0.5
+
+def _slow_upstream_conn(conn):
+    try:
+        _read_head(conn)
+        time.sleep(SLOW_SECONDS)
+        conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nslow")
+    except OSError:
+        pass
+    finally:
+        conn.close()
+
+slow = socket.socket(); slow.bind(("127.0.0.1", 0)); slow.listen(1)
+slow_port = slow.getsockname()[1]
+def _serve_slow():
+    c, _ = slow.accept()
+    _slow_upstream_conn(c)
+threading.Thread(target=_serve_slow, daemon=True).start()
+
+proxy._rules = rules("127.0.0.1:%d\n" % slow_port)
+client, proxy_side = socket.socketpair()
+client.settimeout(10)
+threading.Thread(target=proxy.handle, args=(proxy_side,), daemon=True).start()
+client.sendall(("GET http://127.0.0.1:%d/slow HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n\r\n"
+                % (slow_port, slow_port)).encode())
+answer = b""
+try:
+    while True:
+        chunk = client.recv(4096)
+        if not chunk:
+            break
+        answer += chunk
+except OSError:
+    pass
+ok(answer.endswith(b"slow"),
+   "response slower than the connect timeout still delivered (got %r)" % answer[-40:])
+client.close(); slow.close()
 print("ALL PROXY LOGIC TESTS PASSED")
