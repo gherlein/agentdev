@@ -1,0 +1,15 @@
+# Every role resolves to the local model, and the cloud providers are disabled, so nothing in
+# this profile can reach a frontier model.
+modelRoles:
+  default: litellm/local-qwen
+  smol: litellm/local-qwen
+  commit: litellm/local-qwen
+  plan: litellm/local-qwen
+  slow: litellm/local-qwen
+retry:
+  modelFallback: false
+disabledProviders:
+  - anthropic
+  - openai
+  - google
+setupVersion: 2

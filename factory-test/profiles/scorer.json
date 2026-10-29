@@ -1,0 +1,14 @@
+{
+  "//": "No agent: runs the frozen anchor suite against the candidate binary. The suite, reference and scorer Makefile are mounted read-only and never enter the candidate's workspace. The candidate is read-only here. No network.",
+  "image": "ghcr.io/gherlein/agentdev:latest",
+  "workspace": { "source": "./score", "mount": "out", "mode": "rw", "ssh": false, "usb": false },
+  "network": { "mode": "none" },
+  "mounts": {
+    "read_only": [
+      { "src": "../../task/anchor",    "dest": "/anchor" },
+      { "src": "../../task/reference", "dest": "/reference" },
+      { "src": "../../scorer",         "dest": "/scorer" },
+      { "src": "./work",               "dest": "/candidate" }
+    ]
+  }
+}
