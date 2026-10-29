@@ -207,8 +207,38 @@ alive "$by_home" && alive "$by_proxy" && ok "operator's own agentdev containers 
   || bad "operator's own agentdev containers survive test cleanup" "bystander removed"
 ! alive "$own_home" && ! alive "$own_proxy" && ok "the test's own leftover containers are removed" \
   || bad "the test's own leftover containers are removed" "own container still present"
-podman rm -f "$by_home" "$by_proxy" "$own_home" "$own_proxy" >/dev/null 2>&1
+# --ignore: the test's own two are already gone, and without it podman skips the rest.
+podman rm -f -t 0 --ignore "$by_home" "$by_proxy" "$own_home" "$own_proxy" >/dev/null 2>&1
+alive "$by_home" || alive "$by_proxy" \
+  && bad "bystander containers removed after the scoping check" "left: $by_home $by_proxy" \
+  || ok "bystander containers removed after the scoping check"
 rmdir "$BYSTANDER_HOME"
+
+echo "a signal to agentdev stops its container (timeout, kill, a wrapper's Ctrl-C):"
+# bash defers its traps while a foreground child runs, and podman never sees agentdev's signal,
+# so without forwarding the agent keeps running and the network is never torn down.
+AH5="$ROOT/home-signal"
+NETS_BEFORE=$(podman network ls --format '{{.Name}}' | grep -c '^agentdev-' || true)
+# adev writes the config (the dry run launches nothing); agentdev itself is then started
+# directly, so $! is the launcher and not a wrapping subshell.
+adev "{\"network\":{\"mode\":\"allowlist\",\"allow\":[\"api.anthropic.com\"]},\"mounts\":{\"agent_folder\":\"$AH5\"}}" \
+  --dry-run >/dev/null
+"$AD" -c "$ROOT/config.json" -- bash -lc 'sleep 300' >/dev/null 2>&1 &
+ADEV_PID=$!
+for _ in $(seq 1 60); do
+  [[ -n "$(podman ps -q --filter "label=agentdev.home=$AH5")" ]] && break
+  sleep 1
+done
+kill -TERM "$ADEV_PID"
+for _ in $(seq 1 30); do kill -0 "$ADEV_PID" 2>/dev/null || break; sleep 1; done
+kill -0 "$ADEV_PID" 2>/dev/null && bad "agentdev exits on SIGTERM" "still running" || ok "agentdev exits on SIGTERM"
+left_ctr=$(podman ps -aq --filter "label=agentdev.home=$AH5")
+NETS_AFTER=$(podman network ls --format '{{.Name}}' | grep -c '^agentdev-' || true)
+[[ -z "$left_ctr" ]] && ok "SIGTERM leaves no agent container running" \
+  || bad "SIGTERM leaves no agent container running" "container $left_ctr"
+[[ "$NETS_AFTER" -le "$NETS_BEFORE" ]] && ok "SIGTERM tears down the allowlist networks" \
+  || bad "SIGTERM tears down the allowlist networks" "$(podman network ls --format '{{.Name}}' | grep '^agentdev-')"
+kill -KILL "$ADEV_PID" 2>/dev/null; podman rm -f -t 0 --ignore $left_ctr >/dev/null 2>&1
 
 echo
 echo "LIVE: $PASS passed, $FAIL failed, $SKIP skipped"
