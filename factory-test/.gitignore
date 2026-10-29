@@ -1,0 +1,4 @@
+# Test runs: workspaces, binaries, omp homes, logs. Summarize them with `make results`.
+/runs/*
+!/runs/.gitkeep
+__pycache__/

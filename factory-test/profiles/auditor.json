@@ -1,0 +1,8 @@
+{
+  "//": "Spec-auditor stage: omp + glm-4.5-air with a READ-ONLY workspace, so the auditor cannot edit (the erg pipeline only asked it not to). Its report is captured from stdout. Egress only to LiteLLM, by FQDN.",
+  "image": "ghcr.io/gherlein/agentdev:latest",
+  "workspace": { "source": "./work", "mount": "work", "mode": "ro", "ssh": false, "usb": false },
+  "network": { "mode": "allowlist", "allow": ["dgx1.herlein.me:4000"], "log": true },
+  "mounts": { "agent_folder": "./homes/auditor" },
+  "one-shot": { "agent": "omp" }
+}
