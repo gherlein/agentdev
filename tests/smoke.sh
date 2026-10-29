@@ -103,6 +103,14 @@ checkn "mcp non-string rejected"   '$JC validate "$TMP/m3.json"'
 printf '{"image":"x","workspace":{"source":"."},"mcp":{}}' | cfg "$TMP/m4.json"
 checkn "mcp object rejected"       '$JC validate "$TMP/m4.json"'
 
+echo "host_login schema:"
+printf '{"image":"x","workspace":{"source":"."},"host_login":true}' | cfg "$TMP/h1.json"
+check  "host_login true validates"   '$JC validate "$TMP/h1.json"'
+printf '{"image":"x","workspace":{"source":"."},"host_login":false}' | cfg "$TMP/h2.json"
+check  "host_login false validates"  '$JC validate "$TMP/h2.json"'
+printf '{"image":"x","workspace":{"source":"."},"host_login":"yes"}' | cfg "$TMP/h3.json"
+checkn "host_login string rejected"  '$JC validate "$TMP/h3.json"'
+
 echo "mcp file validation:"
 printf '{"mcpServers":{"x":{"command":"true"}}}' > "$TMP/good.json"
 check  "valid mcpServers accepted"   '( source "$REPO/lib/mcp.sh"; _mcp_validate_file "$TMP/good.json" )'

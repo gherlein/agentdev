@@ -12,6 +12,7 @@
 #   MNT_AGENT_FOLDER MNT_HISTORY MNT_MEMORY   (TTY_DEVICES is an array)
 #   SKILLS_STORE SKILLS_PROFILE               (SKILLS_INCLUDE is an array)
 #   MCP_PRESENT                               (MCP_FILES is an array)
+#   HOST_LOGIN
 #   HAVE_ONESHOT OS_AGENT OS_MODEL OS_PROMPT
 # The mount pair-lists (workspace.files, mounts.read_only/read_write) are read
 # directly from the file by mounts.sh via `jsoncfg.py rows`.
@@ -118,6 +119,9 @@ load_config() {
     MCP_PRESENT=yes
   fi
   _read_list "mcp" MCP_FILES
+
+  # --- host_login (optional; opt-in staging of the host's claude login) ---
+  HOST_LOGIN=$(cfg_scalar "host_login" "false")
 
   # --- one-shot (optional; absence => interactive) ---
   HAVE_ONESHOT=no

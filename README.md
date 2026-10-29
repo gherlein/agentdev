@@ -25,8 +25,9 @@ library, and depends on nothing but `podman` and `python3`.
 - **Linux** with **rootless [podman](https://podman.io)** — the reason it must be podman is below.
 - **python3** — the launcher parses the JSON config with it (already a Claude Code prerequisite).
 - **The container image** — pulled from ghcr.io on first launch, or built locally with `make build`.
-- **Credentials in your environment** — the agent reads `ANTHROPIC_API_KEY` (and any model
-  routing) from a `.env`/`.envrc` in the workspace; agentdev passes none through its config.
+- **Credentials** — either your existing host claude login, reused per run with
+  [`"host_login": true`](#host_login--reuse-your-host-claude-login), or `ANTHROPIC_API_KEY` (and
+  any model routing) from a `.env`/`.envrc` in the workspace.
 
 ### Why podman (and why rootless)
 
@@ -135,6 +136,8 @@ itself, headless, then exit. Here's a whole file; each block is explained below 
 
   "mcp": ["~/.config/agentdev/mcp/codebase-memory.json"],                 // a strict allowlist of MCP config files (omit to inherit the home; [] = no servers)
 
+  "host_login": true,                                                     // stage a per-run copy of your host claude login (claude only; default false)
+
   // Omit "one-shot" for an interactive shell; include it to run the agent headless, then exit:
   "one-shot": {
     "agent":  "claude",                              // supported agent: claude | pi | omp (agentdev maps it to the in-container executable)
@@ -159,9 +162,10 @@ Every key is optional and takes a built-in default; omit a whole block to accept
 
 ### Environment & credentials
 
-**agentdev forwards no credentials through the config.**
+**By default agentdev forwards no credentials.** The one opt-in exception is
+[`host_login`](#host_login--reuse-your-host-claude-login), which reuses your host claude login.
 
-- Everything the agent needs — `ANTHROPIC_API_KEY`, `AWS_*`, a gateway `ANTHROPIC_BASE_URL`,
+- Everything else the agent needs — `ANTHROPIC_API_KEY`, `AWS_*`, a gateway `ANTHROPIC_BASE_URL`,
   `CLAUDE_CODE_USE_BEDROCK`, model routing — comes from a **`.env` or `.envrc` in the workspace
   launch folder**.
 - An interactive shell loads it via `direnv`; a one-shot run sources it before invoking the agent.
@@ -175,6 +179,19 @@ Every key is optional and takes a built-in default; omit a whole block to accept
 - `allowlist` — only `network.allow` destinations are reachable, via a filtering proxy sidecar,
   with optional egress `log` and per-URL `mitm`; add your model's host (e.g. `api.anthropic.com`)
   to `allow`.
+
+**Use fully qualified host names in allowlist mode: no LAN shortcuts.** Write
+`dgx1.example.lan`, not `dgx1`. Use the same full name in `network.allow` and in whatever URL the
+agent calls (e.g. `ANTHROPIC_BASE_URL` in `.env`).
+
+- **Why short names fail.** The proxy sidecar resolves names on a podman bridge network, whose
+  DNS search list is `dns.podman`, not your host's `search` domain. A short name never expands,
+  so the request fails, and the agent sees only an empty reply.
+- **Why both places must match.** The allowlist matches names as strings, so `dgx1` and
+  `dgx1.example.lan` are different entries.
+- **Other modes.** In `off` mode short names happen to work, because podman's default network
+  inherits the host's search domain. Don't rely on that if the same profile may later switch to
+  `allowlist`.
 
 ### mounts — agent home, folders, copied files, tty devices
 
@@ -236,6 +253,34 @@ on the host — ordinary files in the shape Claude accepts for `--mcp-config` / 
   never logs file contents. A missing or malformed file (no top-level `mcpServers`) aborts the launch.
 - Read-only is a bind mount, not file permissions, for the same containment reason as `skills`.
 
+### host_login — reuse your host claude login
+
+If you are already logged in to Claude Code on the host, `"host_login": true` logs claude in
+inside the container too — interactive or one-shot — with no API key, token, or `.env`:
+
+```bash
+agentdev -c ~/agent-profiles/code-review.json --prompt review.md   # profile sets "host_login": true
+```
+
+- **Opt-in, default off.** It puts a live subscription token inside the container, where the
+  agent can read it. Pair it with `network.mode: "allowlist"` so the token can only reach the
+  hosts you list.
+- **Per-run copy, never the live file.** agentdev copies `~/.claude/.credentials.json`
+  (`$CLAUDE_CONFIG_DIR/.credentials.json` if you set that) into a private staging dir and mounts
+  the copy at the agent's credentials path. A token refresh inside the container rewrites the
+  copy, not your host file. The copy is deleted when the run ends.
+- **Only the credentials file crosses.** Your host history, projects, and settings stay on the
+  host.
+- **It wins over a persistent home's own login.** With `mounts.agent_folder`, the host login
+  covers any credentials file the home already holds. The home's file is left byte-identical.
+- **claude only.** A one-shot run with `omp`/`pi` and `host_login` aborts. A missing host login
+  (`~/.claude/.credentials.json` absent, or a macOS Keychain login) aborts with a clear message.
+- **One known risk:** if claude refreshes the token inside the container and the server rotates the
+  refresh token, your host terminal session may need to log in again. One-shot runs are short
+  relative to a token's life, so this should be rare.
+- A workspace `.env` still loads. If it sets `ANTHROPIC_API_KEY`, claude's own precedence decides
+  which credential it uses.
+
 ### one-shot — run the agent headless (optional, last because it's the exception)
 
 **Omit this block for an interactive shell.** Include it and agentdev runs the agent itself on
@@ -264,7 +309,8 @@ so which of `mounts.history` / `mounts.memory` applies varies by agent. (The ima
 
 Setting a redirect an agent doesn't support aborts with a clear message.
 
-Every agent's credentials come from the same `.env`/`.envrc` mechanism.
+Every agent's credentials can come from the same `.env`/`.envrc` mechanism; claude can also reuse
+your host login with [`host_login`](#host_login--reuse-your-host-claude-login).
 
 ## templates/<agent> — per-agent starter kits
 
@@ -290,6 +336,7 @@ The mounted home isolates the agent's **on-disk state**. It does **not** isolate
 **claude.ai account**: if you log the agent into a subscription, account-level **connectors**
 (Atlassian, Microsoft 365, Slack, …) appear even in a clean room — they follow the login, not
 the mounted home.
+`host_login` is a subscription login, so a run that uses it sees those connectors too.
 To keep a run connector-free, authenticate with an API key via `.env` (no subscription login).
 See [`docs/managing-context-and-memory.md`](./docs/managing-context-and-memory.md).
 

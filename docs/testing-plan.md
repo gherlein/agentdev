@@ -23,6 +23,7 @@ and `-- command`), so each test writes a config and runs `agentdev -c <cfg> …`
 | `mounts.tty_devices` | `[/dev/ttyX]` | each matches `/dev/ttyX` and is a device node |
 | `skills.store` / `profile` / `include` | path / name / `[name]` | store exists; each name a conforming skill; profile file exists |
 | `mcp` | `[path]` | each path an existing readable file with a top-level `mcpServers` object; claude-only; `[]` = deny-all |
+| `host_login` | true, false | true needs a readable `${CLAUDE_CONFIG_DIR:-~/.claude}/.credentials.json`; claude-only |
 | `one-shot` | `{agent, model, prompt}` | agent ∈ {claude, omp, pi}; a one-shot run needs a prompt |
 
 ## Tier A — offline plan tests (the bulk)
@@ -50,6 +51,9 @@ no network, no real credentials, so it runs exhaustively in CI with no podman. W
   - **G7** mcp (one-shot `--strict-mcp-config --mcp-config` flags, `[]` deny-all, absent = no
     flags, multiple files ordered + basename-collision prefixes, interactive `AGENTDEV_MCP_ARGS`,
     and the fail-closed negatives: non-claude agent, missing file).
+  - **G8** host_login (plan line when `true`, absent when `false`/omitted, `CLAUDE_CONFIG_DIR`
+    honored, the live credentials path never in the podman command, the token never printed, and
+    the fail-closed negatives: missing login, non-claude agent).
 
 ### Negative suite (must exit non-zero with a specific message)
 
@@ -67,11 +71,17 @@ the `adev` helper). Checks:
 - **ro workspace** → `touch /ws/x` fails; rw → succeeds.
 - **`workspace.ssh: false`** → `/home/developer/.ssh` absent.
 - **`read_write` pair** → the mounted dir is writable inside.
-- **agent home** → a file placed in `agent_folder/.claude` is visible at `/home/developer/.claude`.
+- **agent home** → a fresh home's `.claude.json` is valid JSON (claude aborts its first headless run
+  on an empty one); a file placed in `agent_folder/.claude` is visible at `/home/developer/.claude`.
 - **skills** → a `skills.include` skill is present at `/home/developer/.claude/skills/<name>` and is
   **not writable** inside (the read-only mount holds against the agent).
 - **mcp** → an `mcp` config file is staged by index at `/home/developer/.agentdev-mcp/00.json` and is
   **not writable** inside (the read-only mount holds for MCP config too).
+- **host_login** (fake login via `CLAUDE_CONFIG_DIR`; the operator's real login is never used) → the
+  staged login is present and writable inside; an in-container write leaves the host source
+  byte-identical and the staged copy is discarded on exit; over a persistent home with no
+  credentials, no mount-point stub is left behind; over a home with its own credentials, the host
+  login wins and the home's file is left byte-identical.
 - **single-instance** → a second run on the same `mounts.agent_folder` is refused.
 - **network none** → `curl` fails; **allowlist** → a denied host is blocked (and an allowed host
   reachable where the environment has upstream egress).
@@ -91,15 +101,14 @@ persistence end to end, all through one config file (`mounts.agent_folder` set):
 4. one-shot run 2 (fresh session, same home) whose prompt can only succeed by reading the persisted
    secret — retried once, then fails.
 
-Auth prefers the operator's own subscription, exactly as Tier D does: `~/.claude`
-credentials (`.credentials.json` plus `~/.claude.json`) are **copied** into the throwaway
-`agent_folder`, and the agent authenticates from them. Only the auth material is copied,
-never the operator's `projects/` or history, so the transcript assertion stays honest —
-`projects/` starts empty and can only fill from this run. If no copied credentials are
-found it falls back to `ANTHROPIC_API_KEY` written into a `.env` in the workspace (the key
-is the fallback only; copied creds take precedence). Gate on podman + image + usable
-credentials (`~/.claude/.credentials.json` or `ANTHROPIC_API_KEY`); skip otherwise. Prompts
-go through `--prompt`, so there is no inline `-p` and no TTY-stdin hang.
+Auth prefers the operator's own subscription via `"host_login": true`, so this tier is also the
+end-to-end proof of that feature: agentdev stages a per-run copy of the host login, and only the
+credentials file crosses — never the operator's `projects/` or history — so the transcript
+assertion stays honest (`projects/` starts empty and can only fill from this run). A final
+host-side check asserts the login never persisted into the agent home. With no host login it
+falls back to `ANTHROPIC_API_KEY` written into a `.env` in the workspace. Gate on podman + image +
+usable credentials (`${CLAUDE_CONFIG_DIR:-~/.claude}/.credentials.json` or `ANTHROPIC_API_KEY`);
+skip otherwise. Prompts go through `--prompt`, so there is no inline `-p` and no TTY-stdin hang.
 
 ## Tier D — containment trust (gated, real model cost)
 

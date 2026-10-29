@@ -72,6 +72,13 @@ grep -q RW_OK <<<"$out" && ok "read_write pair is writable inside" || bad "read_
 echo "agent home (mounted .claude is visible):"
 AH="$ROOT/home"
 adev "{\"mounts\":{\"agent_folder\":\"$AH\"}}" -- true >/dev/null 2>&1
+# claude aborts its first headless run on an empty (unparseable) .claude.json, so a fresh
+# home must be seeded with valid JSON.
+if python3 -I -c 'import json,sys; json.load(open(sys.argv[1]))' "$AH/.claude.json" 2>/dev/null; then
+  ok "fresh home's .claude.json is valid JSON"
+else
+  bad "fresh home's .claude.json is valid JSON" "$(stat -c '%s bytes' "$AH/.claude.json" 2>&1)"
+fi
 mkdir -p "$AH/.claude/skills/demo"
 printf -- '---\nname: demo\n---\nbody\n' > "$AH/.claude/skills/demo/SKILL.md"
 out=$(adev "{\"mounts\":{\"agent_folder\":\"$AH\"}}" -- bash -lc 'test -f /home/developer/.claude/skills/demo/SKILL.md && echo SKILL_OK || echo SKILL_NO')
@@ -102,6 +109,52 @@ out=$(adev "{\"mcp\":[\"$MC/m.json\"]}" -- bash -lc '
   test -f /home/developer/.agentdev-mcp/00.json || { echo NOMCP; exit 0; }
   echo X > /home/developer/.agentdev-mcp/00.json 2>/dev/null && echo WRITABLE || echo READONLY')
 grep -q READONLY <<<"$out" && ok "selected mcp config present and read-only inside" || bad "selected mcp config present and read-only inside" "$out"
+
+echo "host_login (per-run copy of the host login):"
+# A FAKE login via CLAUDE_CONFIG_DIR: the operator's real login is never used here.
+FL="$ROOT/fakelogin"; mkdir -p "$FL"
+printf '{"claudeAiOauth":{"accessToken":"FAKE-HOST-LOGIN"}}\n' > "$FL/.credentials.json"
+FL_SHA0="$(sha256sum "$FL/.credentials.json" | awk '{print $1}')"
+CREDS_IN=/home/developer/.claude/.credentials.json
+MARK="REFRESHED-$RANDOM$RANDOM"
+# The in-container write mimics claude's token refresh: an in-place O_TRUNC rewrite.
+# Staging goes to a TMPDIR owned by this case, so "discarded" is checked on exactly the
+# run's own scratch rather than a shared /tmp grep (which root-only dirs make unfalsifiable).
+HL_TMP="$ROOT/hl-tmp"; mkdir -p "$HL_TMP"
+out=$(export CLAUDE_CONFIG_DIR="$FL" TMPDIR="$HL_TMP"; adev '{"host_login":true}' -- bash -lc "
+  grep -q FAKE-HOST-LOGIN $CREDS_IN && echo PRESENT || echo ABSENT
+  echo $MARK > $CREDS_IN 2>/dev/null && echo WROTE || echo NOWRITE")
+grep -q PRESENT <<<"$out" && grep -q WROTE <<<"$out" \
+  && ok "host login present and writable inside (ephemeral home)" \
+  || bad "host login present and writable inside (ephemeral home)" "$out"
+[[ "$(sha256sum "$FL/.credentials.json" | awk '{print $1}')" == "$FL_SHA0" ]] \
+  && ok "in-container write never reaches the host login (byte-identical)" \
+  || bad "in-container write never reaches the host login" "host source changed"
+if [[ -z "$(ls -A "$HL_TMP")" ]]; then
+  ok "staged copy discarded on exit"
+else
+  bad "staged copy discarded on exit" "left in TMPDIR: $(ls -A "$HL_TMP")"
+fi
+
+AH2="$ROOT/home-nocreds"
+out=$(export CLAUDE_CONFIG_DIR="$FL"; adev "{\"host_login\":true,\"mounts\":{\"agent_folder\":\"$AH2\"}}" -- bash -lc "
+  grep -q FAKE-HOST-LOGIN $CREDS_IN && echo PRESENT || echo ABSENT")
+grep -q PRESENT <<<"$out" && ok "host login present over a persistent home" \
+  || bad "host login present over a persistent home" "$out"
+[[ ! -e "$AH2/.claude/.credentials.json" ]] && ok "no mount-point stub left in the persistent home" \
+  || bad "no mount-point stub left in the persistent home" "$(ls -la "$AH2/.claude/" 2>&1)"
+
+AH3="$ROOT/home-owncreds"; mkdir -p "$AH3/.claude"
+printf 'HOME-OWN-CREDS\n' > "$AH3/.claude/.credentials.json"
+OWN_SHA0="$(sha256sum "$AH3/.claude/.credentials.json" | awk '{print $1}')"
+out=$(export CLAUDE_CONFIG_DIR="$FL"; adev "{\"host_login\":true,\"mounts\":{\"agent_folder\":\"$AH3\"}}" -- bash -lc "
+  grep -q FAKE-HOST-LOGIN $CREDS_IN && echo HOSTWINS || echo HOMEWINS
+  echo $MARK > $CREDS_IN 2>/dev/null || true")
+grep -q HOSTWINS <<<"$out" && ok "explicit host_login wins over the home's own credentials" \
+  || bad "explicit host_login wins over the home's own credentials" "$out"
+[[ "$(sha256sum "$AH3/.claude/.credentials.json" | awk '{print $1}')" == "$OWN_SHA0" ]] \
+  && ok "the home's own credentials are left byte-identical" \
+  || bad "the home's own credentials are left byte-identical" "$(cat "$AH3/.claude/.credentials.json")"
 
 if [[ "$HAVE_NET" == yes ]]; then
   echo "network isolation:"

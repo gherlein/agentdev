@@ -122,7 +122,9 @@ _mount_home() {
       [[ -n "$item" ]] || continue
       host="$MNT_AGENT_FOLDER/$item"; cont="$AGENT_HOME/$item"
       if [[ "$DRY_RUN" != yes ]]; then
-        if [[ "$kind" == dir ]]; then mkdir -p "$host"; else [[ -e "$host" ]] || : > "$host"; fi
+        # A home file is a JSON config, and claude aborts its first headless run on an empty
+        # (unparseable) one, so a missing or empty file is seeded as an empty object.
+        if [[ "$kind" == dir ]]; then mkdir -p "$host"; else [[ -s "$host" ]] || printf '{}\n' > "$host"; fi
       fi
       register_target "$cont" "agent home ($item)"
       HOME_MOUNTS+=("-v" "$host:$cont:rw")

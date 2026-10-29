@@ -170,7 +170,10 @@ network; `HTTP(S)_PROXY` points the agent at the proxy, so a client ignoring the
 nothing). `network.log` writes `<agent_folder>/agentdev-egress.log` (ephemeral if no `agent_folder`);
 `network.mitm` adds per-URL filtering with a per-run CA. Because model routing lives in `.env`,
 agentdev does not derive the model endpoint — under `allowlist` you add the model host to
-`network.allow`. The proxy and networks are removed by the EXIT trap.
+`network.allow`. The proxy and networks are removed by the EXIT trap. Allowlist names must be fully
+qualified: the sidecar's bridge-network DNS search list is `dns.podman`, not the host's `search`
+domain, so LAN short names (`dgx1`) do not resolve. This is deliberate. Inheriting the host search
+domain would silently widen what a short allowlist entry can reach.
 
 ---
 

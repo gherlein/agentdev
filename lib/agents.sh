@@ -15,7 +15,8 @@ agent_known() { case "$1" in claude|omp|pi) return 0 ;; *) return 1 ;; esac; }
 
 # agent_home_items NAME -> the home dir(s)/file(s) this agent keeps, each a path
 # relative to both agent_folder (host) and $AGENT_HOME (container). One per line.
-# The last field "dir" or "file" says what to pre-create for a clean home.
+# The last field "dir" or "file" says what to pre-create for a clean home (a "file" is a
+# JSON config, seeded as {}).
 agent_home_items() {
   case "$1" in
     claude) printf '.claude\tdir\n.claude.json\tfile\n' ;;
