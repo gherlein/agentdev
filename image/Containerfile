@@ -178,6 +178,9 @@ ENV PATH="${PATH}:/home/developer/bin"
 
 # --- entrypoint (agentdev's own: UID remap + host-home symlink + gosu) -------
 USER root
+# Login shells (every one-shot runs through `bash -lc`) get PATH reset by Debian's
+# /etc/profile, dropping Go, Node, npm-global and pi. Restore the image's full PATH.
+RUN printf 'export PATH="%s"\n' "$PATH" > /etc/profile.d/00-agentdev-path.sh
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 # The egress allowlist proxy (lib/net.sh runs it in a sidecar from this image, so
