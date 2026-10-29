@@ -140,10 +140,11 @@ verify_loop() {
   LOOP_RESULT=fail
 }
 
-# audit_passed REPORT -> 0 if the report's last non-empty line is exactly "AUDIT: PASS".
-# A report with no verdict is a gap, so a confused auditor can never pass a run by accident.
+# audit_passed REPORT -> 0 only if the whole report, ignoring blank lines and surrounding
+# whitespace, is exactly "AUDIT: PASS" (the erg lead's rule). Checking only the last line let a
+# run pass whose auditor listed six gaps and then wrote AUDIT: PASS anyway.
 audit_passed() {
-  [[ "$(grep -v '^[[:space:]]*$' "$1" | tail -n 1 | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')" == "AUDIT: PASS" ]]
+  [[ "$(grep -v '^[[:space:]]*$' "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')" == "AUDIT: PASS" ]]
 }
 
 # --- commands --------------------------------------------------------------------------
@@ -282,5 +283,8 @@ case "${1:-}" in
   selftest) cmd_selftest ;;
   score)    [[ $# -eq 2 ]] || die "usage: $0 score RUN_DIR"; score_run "$2" ;;
   results)  cmd_results ;;
+  audit-verdict)
+    [[ $# -eq 2 && -f "$2" ]] || die "usage: $0 audit-verdict REPORT_FILE"
+    if audit_passed "$2"; then echo PASS; else echo GAPS; exit 1; fi ;;
   *)        sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

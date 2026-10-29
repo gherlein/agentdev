@@ -43,6 +43,7 @@ flowchart TD
 
 ```bash
 cd factory-test
+make harness             # offline: the harness's own decisions (audit gate)
 make selftest            # first: reference = 32/32, a fake binary must score lower
 make run                 # one full run (local models only; about 1-1.5 h)
 make run LABEL=baseline  # name the run
@@ -82,7 +83,7 @@ Each run lives in `runs/<timestamp>[-label]/` (ignored by git):
 
 | Outcome | Meaning |
 |---|---|
-| `completed` | the build and tests passed, and an audit returned `AUDIT: PASS` |
+| `completed` | the build and tests passed, and an audit report was exactly `AUDIT: PASS` (a report that lists gaps and also says `AUDIT: PASS` is a failed audit) |
 | `audit-budget-exhausted` | every audit round found gaps |
 | `verify-failed` | `make build && make test` still failed after `VERIFY_RETRIES` fixes |
 | `capped` | the run clock (`RUN_TIMEOUT`) ran out; the step in flight was stopped |
@@ -165,6 +166,7 @@ factory-test/
 ├── omp-seed/           clean omp homes: glm (reasoner, auditor) and qwen (coder)
 ├── scorer/Makefile     runs inside the scorer container (reference build, anchor run)
 ├── lib/                anchor_score.py (go test -json -> score), results.py (table)
+├── tests/              harness_test.sh (offline tests of the audit gate)
 ├── task/               the frozen task: VISION.md, anchor/, reference/
 └── runs/               one directory per test run (git-ignored)
 ```

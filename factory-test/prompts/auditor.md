@@ -13,8 +13,12 @@ Report only real gaps against a stated design rule; ignore style and taste. For 
 - the `file:line` where it is missing or wrong;
 - one sentence on what is wrong, and the input that exposes it.
 
-If and only if there are no gaps, the LAST line of your answer must be exactly:
+If and only if there are no gaps, your ENTIRE answer must be exactly this line, with nothing
+before or after it:
 
     AUDIT: PASS
+
+If you found any gap, do not write `AUDIT: PASS` anywhere. A report that lists gaps and also
+says `AUDIT: PASS` counts as failed.
 
 The workspace is mounted read-only. Your printed answer is the report.

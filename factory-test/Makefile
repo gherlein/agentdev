@@ -14,6 +14,10 @@ help: ## Show this help
 selftest: ## Prove the scorer: the reference passes every case, a fake binary does not
 	./factory.sh selftest
 
+.PHONY: harness
+harness: ## Offline tests of factory.sh's own decisions (audit gate); no podman needed
+	./tests/harness_test.sh
+
 .PHONY: run
 run: ## One full pipeline run, then score it (LABEL=name optional)
 	./factory.sh run $(LABEL)
@@ -32,8 +36,9 @@ results: ## Markdown table of every run under runs/
 .PHONY: build test run-tests clean
 build: ## Check the harness scripts parse
 	bash -n factory.sh
+	bash -n tests/harness_test.sh
 	python3 -m py_compile lib/anchor_score.py lib/results.py
-test: selftest ## Alias for selftest
+test: harness selftest ## Offline harness tests, then the scorer selftest
 run-tests: test ## Alias for test
 clean: ## Remove python caches (runs/ is kept; delete runs yourself)
 	rm -rf lib/__pycache__
