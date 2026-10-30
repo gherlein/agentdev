@@ -1,11 +1,11 @@
 # Every role resolves to the local model, and the cloud providers are disabled, so nothing in
 # this profile can reach a frontier model.
 modelRoles:
-  default: litellm/local-qwen
-  smol: litellm/local-qwen
-  commit: litellm/local-qwen
-  plan: litellm/local-qwen
-  slow: litellm/local-qwen
+  default: litellm/qwen3.8-27b
+  smol: litellm/qwen3.8-27b
+  commit: litellm/qwen3.8-27b
+  plan: litellm/qwen3.8-27b
+  slow: litellm/qwen3.8-27b
 retry:
   modelFallback: false
 disabledProviders:

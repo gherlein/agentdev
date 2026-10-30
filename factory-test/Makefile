@@ -3,6 +3,8 @@
 
 LABEL ?=
 RUN   ?=
+# How the coder reaches qwen3.8-27b: litellm, or sglang (direct to the SGLang proxy on dgx1).
+CODER ?= litellm
 
 .DEFAULT_GOAL := help
 
@@ -19,8 +21,8 @@ harness: ## Offline tests of factory.sh's own decisions (audit gate); no podman 
 	./tests/harness_test.sh
 
 .PHONY: run
-run: ## One full pipeline run, then score it (LABEL=name optional)
-	./factory.sh run $(LABEL)
+run: ## One full pipeline run, then score it (LABEL=name, CODER=litellm|sglang optional)
+	CODER_BACKEND=$(CODER) ./factory.sh run $(LABEL)
 
 .PHONY: score
 score: ## Re-build and re-score an existing run (RUN=runs/<id>)

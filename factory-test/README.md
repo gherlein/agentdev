@@ -37,7 +37,9 @@ flowchart TD
   - the login-shell `PATH` fix, so `go` resolves in `bash -lc`;
   - the proxy fixes (keep-alive, slow responses);
   - the signal fix, so a capped step really stops.
-- LiteLLM at `http://dgx1.herlein.me:4000`, serving `glm-4.5-air` (dgx2) and `local-qwen` (dgx1).
+- LiteLLM at `http://dgx1.herlein.me:4000`, serving `glm-4.5-air` (dgx2) and `qwen3.8-27b` (Qwen3.8-27B NVFP4 + DFlash2 on SGLang, dgx1).
+- For `CODER=sglang` only: the qwen38 SGLang proxy's Bearer key in `~/.config/qwen38/api-key`
+  (mode 600; copy it from the same path on dgx1).
 
 ## Run a test
 
@@ -47,6 +49,7 @@ make harness             # offline: the harness's own decisions (audit gate)
 make selftest            # first: reference = 32/32, a fake binary must score lower
 make run                 # one full run (local models only; about 1-1.5 h)
 make run LABEL=baseline  # name the run
+make run CODER=sglang    # coder talks straight to SGLang instead of through LiteLLM
 make results             # table of every run
 make score RUN=runs/<id> # re-build and re-score an existing run
 ```
@@ -59,10 +62,41 @@ Budgets are environment variables:
 | `AUDIT_CYCLES` | 3 | auditor rounds before the run stops as `audit-budget-exhausted` |
 | `RUN_TIMEOUT` | 5400 | wall-clock cap in seconds (90 min, the erg benchmark's cap) |
 | `VERIFY_TIMEOUT` | 600 | cap on one verify |
+| `CODER_BACKEND` (`make run CODER=`) | `litellm` | how the coder reaches `qwen3.8-27b`: `litellm` or `sglang` (see below) |
+| `QWEN38_KEY_FILE` | `~/.config/qwen38/api-key` | the SGLang key, used only with `sglang` |
 
 ```bash
 AUDIT_CYCLES=2 RUN_TIMEOUT=3600 make run LABEL=tight
 ```
+
+### The two coder routes
+
+Both routes serve the same model, `qwen3.8-27b`, from the same SGLang engine on dgx1. Only the
+path differs, so comparing them measures LiteLLM's effect. The reasoner and auditor use
+`glm-4.5-air` through LiteLLM on both routes.
+
+```mermaid
+flowchart LR
+  subgraph litellm[CODER=litellm, the default]
+    C1[coder<br/>profiles/coder.json<br/>omp-seed/qwen] -->|dgx1:4000, no key| L[LiteLLM] -->|Bearer key| P1[SGLang proxy :30001]
+  end
+  subgraph sglang[CODER=sglang]
+    C2[coder<br/>profiles/coder-sglang.json<br/>omp-seed/qwen-sglang] -->|dgx1:30001, Bearer key| P2[SGLang proxy :30001]
+  end
+```
+
+| | `litellm` | `sglang` |
+|---|---|---|
+| coder egress allowlist | `dgx1.herlein.me:4000` | `dgx1.herlein.me:30001` |
+| omp provider | `litellm`, `auth: none` | `sglang`, `apiKey: "!cat …/qwen38-api-key"` |
+| key inside the coder container | never | during each coder step |
+
+With `sglang`, `factory.sh` copies the key into the coder's omp home
+(`.omp/agent/qwen38-api-key`, mode 600) when it reseeds the home, and deletes it from `homes/`
+and `logs/` after every step and when the run exits, even when it is killed. The key is never
+in `work/`, so it never reaches `history.git` or the auditor. The coder's own tools can still read
+it while the step runs: that is the price of going direct. If ufw closes port 30001 to the LAN,
+this route stops working.
 
 ## What a run records
 
@@ -70,7 +104,7 @@ Each run lives in `runs/<timestamp>[-label]/` (ignored by git):
 
 | Path | Contents |
 |---|---|
-| `meta.json` | outcome, agent seconds, audit rounds, budgets, models, agentdev commit, image id, task checksum, and every step with its rc and seconds |
+| `meta.json` | outcome, agent seconds, audit rounds, budgets, models, coder backend, agentdev commit, image id, task checksum, and every step with its rc and seconds |
 | `score.json` | anchor `passed`/`total` and the names of the failed cases |
 | `work/` | the candidate workspace: what the agents saw and wrote |
 | `history.git` | one commit per step: `git --git-dir=runs/<id>/history.git log --stat` |
@@ -98,7 +132,7 @@ stopped.
 |---|---|---|
 | `lead` (prompt-driven `task` calls) | `factory.sh` | order and budgets enforced in code |
 | `brainstorm`, `designer` | `profiles/reasoner.json` + `prompts/{brainstorm,designer}.md` | omp + glm-4.5-air |
-| `implementer`, `fixer` | `profiles/coder.json` + `prompts/{implementer,fixer}.md` | omp + local-qwen |
+| `implementer`, `fixer` | `profiles/coder.json` (or `coder-sglang.json`) + `prompts/{implementer,fixer}.md` | omp + qwen3.8-27b |
 | `spec-auditor` | `profiles/auditor.json` + `prompts/auditor.md` | **read-only workspace** (erg only asked it not to edit) |
 | lead's `make build && make test` | `profiles/sandbox.json` | network `none` |
 | compare-agents scoring | `profiles/scorer.json` + `scorer/Makefile` | anchor read-only, absolute `PNGDEC_BIN` |
@@ -127,7 +161,8 @@ audit loop are reproduced by `verify_loop` and the audit loop in `factory.sh`.
   are mounted only into the scorer container, never into an agent's container.
 - Each agent step starts from a **fresh omp home** (`omp-seed/`): no memory or session carries
   between stages, only files in `work/`. That matches erg's fresh context per `task`.
-- Every local profile allows egress **only** to `dgx1.herlein.me:4000`. A fully qualified name is
+- Every local profile allows egress **only** to `dgx1.herlein.me:4000` (`coder-sglang.json`: only
+  `dgx1.herlein.me:30001`). A fully qualified name is
   required, because allowlist mode cannot resolve LAN short names. Each step's egress log is kept
   under `logs/`.
 
@@ -163,10 +198,10 @@ factory-test/
 ├── factory.sh          the harness: stages, budgets, clock, scoring, metadata
 ├── profiles/           agentdev configs, copied into each run
 ├── prompts/            stage prompts (erg's, adapted)
-├── omp-seed/           clean omp homes: glm (reasoner, auditor) and qwen (coder)
+├── omp-seed/           clean omp homes: glm (reasoner, auditor), qwen and qwen-sglang (coder)
 ├── scorer/Makefile     runs inside the scorer container (reference build, anchor run)
 ├── lib/                anchor_score.py (go test -json -> score), results.py (table)
-├── tests/              harness_test.sh (offline tests of the audit gate)
+├── tests/              harness_test.sh (offline tests: audit gate, coder backend and key handling)
 ├── task/               the frozen task: VISION.md, anchor/, reference/
 └── runs/               one directory per test run (git-ignored)
 ```

@@ -1,0 +1,26 @@
+# omp provider: the qwen38 SGLang proxy on dgx1, reached directly (no LiteLLM). It serves
+# Qwen3.8-27B NVFP4 with DFlash2 speculative decoding as qwen3.8-27b. Only this one model is
+# declared, and there is no discovery.
+providers:
+  sglang:
+    # Fully qualified: allowlist mode cannot resolve LAN short names.
+    baseUrl: http://dgx1.herlein.me:30001/v1
+    api: openai-completions
+    # The proxy requires a Bearer key. It is never committed: factory.sh copies it into this home
+    # for the length of one step (CODER_BACKEND=sglang) and deletes it afterwards. A leading "!"
+    # makes omp run the command and use its output as the key.
+    apiKey: "!cat /home/developer/.omp/agent/qwen38-api-key"
+    compat:
+      supportsDeveloperRole: false
+      supportsStore: false
+    models:
+      - id: qwen3.8-27b
+        name: Qwen3.8 27B NVFP4 + DFlash2 (dgx1 sglang, direct)
+        # SGLang runs with --reasoning-parser qwen3 and returns the thinking as reasoning_content.
+        reasoning: true
+        input: [text]
+        # SGLang allows 1,010,000 tokens (YaRN); 262144 is the model's native window and far
+        # more than any factory step needs.
+        contextWindow: 262144
+        maxTokens: 32000
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }

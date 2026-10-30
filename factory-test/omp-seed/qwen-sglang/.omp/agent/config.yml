@@ -1,0 +1,15 @@
+# Every role resolves to the local model, and the cloud providers are disabled, so nothing in
+# this profile can reach a frontier model.
+modelRoles:
+  default: sglang/qwen3.8-27b
+  smol: sglang/qwen3.8-27b
+  commit: sglang/qwen3.8-27b
+  plan: sglang/qwen3.8-27b
+  slow: sglang/qwen3.8-27b
+retry:
+  modelFallback: false
+disabledProviders:
+  - anthropic
+  - openai
+  - google
+setupVersion: 2

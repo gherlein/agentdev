@@ -16,6 +16,10 @@
 #   AUDIT_CYCLES    auditor rounds before giving up (default 3)
 #   RUN_TIMEOUT     wall-clock cap on agent work + in-band verify, seconds (default 5400 = 90 min)
 #   VERIFY_TIMEOUT  cap on one verify, seconds (default 600)
+#   CODER_BACKEND   how the coder reaches qwen3.8-27b: litellm (default) or sglang (straight to
+#                   the qwen38 SGLang proxy on dgx1, bypassing LiteLLM)
+#   QWEN38_KEY_FILE the SGLang proxy's Bearer key, for CODER_BACKEND=sglang
+#                   (default ~/.config/qwen38/api-key)
 #   AGENTDEV        launcher (default: ../agentdev, then agentdev on PATH)
 set -euo pipefail
 
@@ -24,6 +28,10 @@ VERIFY_RETRIES="${VERIFY_RETRIES:-3}"
 AUDIT_CYCLES="${AUDIT_CYCLES:-3}"
 RUN_TIMEOUT="${RUN_TIMEOUT:-5400}"
 VERIFY_TIMEOUT="${VERIFY_TIMEOUT:-600}"
+CODER_BACKEND="${CODER_BACKEND:-litellm}"
+QWEN38_KEY_FILE="${QWEN38_KEY_FILE:-$HOME/.config/qwen38/api-key}"
+# Where the sglang seed's models.yml reads the key, relative to the omp home.
+SGLANG_KEY_IN_HOME=.omp/agent/qwen38-api-key
 # Seconds a step gets after TERM before it is killed.
 KILL_GRACE=60
 # Lines of failing verify output handed to the fixer.
@@ -38,6 +46,12 @@ die() { echo "Error: $*" >&2; exit 2; }
 for v in VERIFY_RETRIES AUDIT_CYCLES RUN_TIMEOUT VERIFY_TIMEOUT; do
   [[ "${!v}" =~ ^[0-9]+$ ]] || die "$v must be a non-negative integer: ${!v}"
 done
+# The coder's profile and omp seed for each route; reasoner and auditor always use LiteLLM.
+case "$CODER_BACKEND" in
+  litellm) CODER_PROFILE=coder;        CODER_SEED=qwen ;;
+  sglang)  CODER_PROFILE=coder-sglang; CODER_SEED=qwen-sglang ;;
+  *)       die "CODER_BACKEND must be litellm or sglang: $CODER_BACKEND" ;;
+esac
 command -v "$AGENTDEV" >/dev/null || die "agentdev not found (set AGENTDEV=...)"
 command -v python3 >/dev/null || die "python3 is required on the host"
 
@@ -69,6 +83,13 @@ reseed() {
   local home="$RUN/homes/$1"
   if [[ -d "$home" ]]; then mv "$home" "$RUN/logs/home-$1-$(date +%H%M%S)"; fi
   cp -r "$HERE/omp-seed/$2" "$home"
+  if [[ "$2" == qwen-sglang ]]; then install -m 600 "$QWEN38_KEY_FILE" "$home/$SGLANG_KEY_IN_HOME"; fi
+}
+
+# drop_keys -> delete every copied SGLang key under the run, so spent homes in logs/ and homes/
+# never keep it.
+drop_keys() {
+  find "$RUN/homes" "$RUN/logs" -path "*/$SGLANG_KEY_IN_HOME" -type f -delete 2>/dev/null || true
 }
 
 # agent_step NAME PROFILE HOME SEED PROMPT_FILE -> one agentdev one-shot under the run clock.
@@ -83,6 +104,7 @@ agent_step() {
   timeout --signal=TERM --kill-after="$KILL_GRACE" "$left" \
     "$AGENTDEV" -c "$RUN/$profile.json" --prompt "$prompt" \
     >"$RUN/logs/$name.out" 2>"$RUN/logs/$name.err" || STEP_RC=$?
+  drop_keys
   record "$name" "$profile" "$STEP_RC" $(( $(date +%s) - start ))
   echo "    rc=$STEP_RC $(( $(date +%s) - start ))s"
   snapshot "$name"
@@ -133,7 +155,7 @@ verify_loop() {
     (( attempt < VERIFY_RETRIES )) || break
     tail -n "$FAILURE_TAIL_LINES" "$RUN/logs/verify-$tag-$attempt.out" "$RUN/logs/verify-$tag-$attempt.err" \
       > "$RUN/logs/verify-$tag-$attempt.report"
-    agent_step "fix-verify-$tag-$attempt" coder coder qwen \
+    agent_step "fix-verify-$tag-$attempt" "$CODER_PROFILE" coder "$CODER_SEED" \
       "$(fixer_prompt "fix-verify-$tag-$attempt" "$RUN/logs/verify-$tag-$attempt.report")"
     (( STEP_RC == TIMEOUT_EXIT )) && { LOOP_RESULT=capped; return; }
   done
@@ -153,7 +175,12 @@ cmd_run() {
   local label="${1:-}" id cycle stage
   id="$(date +%Y%m%d-%H%M%S)${label:+-$label}"
   [[ -z "$label" || "$label" =~ ^[A-Za-z0-9._-]+$ ]] || die "label must be [A-Za-z0-9._-]: $label"
+  if [[ "$CODER_BACKEND" == sglang ]]; then
+    [[ -s "$QWEN38_KEY_FILE" ]] || die "CODER_BACKEND=sglang needs the SGLang key in $QWEN38_KEY_FILE"
+  fi
   RUN="$(new_run_dir "$id")"
+  # A killed run must not leave the key behind in a step's home.
+  trap drop_keys EXIT
   cp "$HERE/task/VISION.md" "$RUN/work/VISION.md"
   git init -q --bare "$RUN/history.git"
   snapshot "vision"
@@ -170,7 +197,7 @@ cmd_run() {
   done
 
   if [[ -z "$OUTCOME" ]]; then
-    agent_step implementer coder coder qwen "$HERE/prompts/implementer.md"
+    agent_step implementer "$CODER_PROFILE" coder "$CODER_SEED" "$HERE/prompts/implementer.md"
     (( STEP_RC == TIMEOUT_EXIT )) && OUTCOME=capped
   fi
   if [[ -z "$OUTCOME" ]]; then
@@ -185,7 +212,7 @@ cmd_run() {
       cp "$RUN/logs/audit-$cycle.out" "$RUN/logs/audit-$cycle.report"
       audit_passed "$RUN/logs/audit-$cycle.report" && { OUTCOME=completed; break; }
       (( cycle < AUDIT_CYCLES )) || { OUTCOME=audit-budget-exhausted; break; }
-      agent_step "fix-audit-$cycle" coder coder qwen \
+      agent_step "fix-audit-$cycle" "$CODER_PROFILE" coder "$CODER_SEED" \
         "$(fixer_prompt "fix-audit-$cycle" "$RUN/logs/audit-$cycle.report")"
       (( STEP_RC == TIMEOUT_EXIT )) && { OUTCOME=capped; break; }
       verify_loop "audit-$cycle"
@@ -255,7 +282,8 @@ json.dump({
   "agentdev_commit": "$(git -C "$HERE/.." rev-parse --short HEAD 2>/dev/null || echo unknown)",
   "image": "$(podman image inspect --format '{{.Id}}' "$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$RUN/coder.json")" 2>/dev/null | cut -c1-12)",
   "task_sha256": "$(cd "$HERE/task" && find . -type f | sort | xargs sha256sum | sha256sum | cut -c1-16)",
-  "models": {"reasoner": "glm-4.5-air", "auditor": "glm-4.5-air", "coder": "local-qwen"},
+  "models": {"reasoner": "glm-4.5-air", "auditor": "glm-4.5-air", "coder": "qwen3.8-27b"},
+  "coder_backend": "$CODER_BACKEND",
   "agent": "omp",
   "budgets": {"verify_retries": $VERIFY_RETRIES, "audit_cycles": $AUDIT_CYCLES,
               "run_timeout_s": $RUN_TIMEOUT, "verify_timeout_s": $VERIFY_TIMEOUT},

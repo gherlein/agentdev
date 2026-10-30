@@ -27,6 +27,12 @@ def anchor_cell(score):
     return "%d/%d" % (score["passed"], score["total"])
 
 
+def coder_cell(meta):
+    coder = meta.get("models", {}).get("coder", "-")
+    # Runs from before CODER_BACKEND existed all went through LiteLLM.
+    return "%s via %s" % (coder, meta.get("coder_backend", "litellm"))
+
+
 def stage_minutes(meta, prefix):
     total = sum(step["seconds"] for step in meta.get("steps", []) if step["step"].startswith(prefix))
     return minutes(total)
@@ -39,8 +45,9 @@ def main(runs_dir):
         if meta is None:
             continue
         score = load(os.path.join(runs_dir, name, "score.json"))
-        rows.append("| %s | %s | %s | %s | %s | %s | %s | %s |" % (
+        rows.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
             name,
+            coder_cell(meta),
             meta.get("outcome", "running?"),
             minutes(meta.get("agent_seconds")),
             stage_minutes(meta, "implementer"),
@@ -49,9 +56,9 @@ def main(runs_dir):
             meta.get("audit_rounds", "-"),
             anchor_cell(score),
         ))
-    print("| run | outcome | agent min | implement min | fix min | audit min | audits | anchor |")
-    print("|---|---|---|---|---|---|---|---|")
-    print("\n".join(rows) if rows else "| (no runs yet) | | | | | | | |")
+    print("| run | coder | outcome | agent min | implement min | fix min | audit min | audits | anchor |")
+    print("|---|---|---|---|---|---|---|---|---|")
+    print("\n".join(rows) if rows else "| (no runs yet) | | | | | | | | |")
 
 
 if __name__ == "__main__":
