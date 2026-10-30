@@ -1,6 +1,0 @@
-{
-  "//": "No agent: the harness's own verify gate (make build && make test) and the post-run build, run on the candidate workspace with no network at all.",
-  "image": "ghcr.io/gherlein/agentdev:latest",
-  "workspace": { "source": "./work", "mount": "work", "mode": "rw", "ssh": false, "usb": false },
-  "network": { "mode": "none" }
-}

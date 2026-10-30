@@ -1,8 +1,0 @@
-{
-  "//": "Reasoner stages (brainstorm, designer): omp + glm-4.5-air (Ollama on dgx2 via LiteLLM). Writable workspace. Copied into each run dir, so ./work and ./homes resolve per run. Egress only to LiteLLM, by FQDN.",
-  "image": "ghcr.io/gherlein/agentdev:latest",
-  "workspace": { "source": "./work", "mount": "work", "mode": "rw", "ssh": false, "usb": false },
-  "network": { "mode": "allowlist", "allow": ["dgx1.herlein.me:4000"], "log": true },
-  "mounts": { "agent_folder": "./homes/reasoner" },
-  "one-shot": { "agent": "omp" }
-}

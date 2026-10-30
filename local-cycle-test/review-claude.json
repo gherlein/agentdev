@@ -1,9 +1,0 @@
-{
-  "//": "Final review on the CLOUD: Claude via your host claude login (host_login: a per-run copy, discarded on exit). Read-only workspace: the reviewer cannot change the code; its verdict is captured from stdout. No .env is injected, so nothing routes it to LiteLLM. Egress only to Anthropic (API, telemetry, OAuth refresh).",
-  "image": "ghcr.io/gherlein/agentdev:latest",
-  "workspace": { "source": "./project", "mount": "work", "mode": "ro", "ssh": false, "usb": false },
-  "network": { "mode": "allowlist", "allow": ["api.anthropic.com", "statsig.anthropic.com", "platform.claude.com"], "log": false },
-  "mcp": [],
-  "host_login": true,
-  "one-shot": { "agent": "claude", "model": "opus", "prompt": "prompts/final-review.md" }
-}
