@@ -1,24 +1,27 @@
-# omp provider: LiteLLM on dgx1 (OpenAI-compatible), serving qwen3-coder-next:q8_0 from Ollama on
-# dgx1 under the alias local-qwen. Only this one model is declared, and there is no discovery:
-# LiteLLM also routes cloud models, and they must not be selectable from this profile.
+# omp provider: LiteLLM on dgx1 (OpenAI-compatible), serving Qwen3.8-27B NVFP4 from SGLang with
+# DFlash2 speculative decoding (container qwen38-sglang on dgx1) under the alias qwen3.8-27b. Only
+# this one model is declared, and there is no discovery: LiteLLM also routes cloud models, and they
+# must not be selectable from this profile.
 providers:
   litellm:
     # Fully qualified: allowlist mode cannot resolve LAN short names.
     baseUrl: http://dgx1.herlein.me:4000/v1
     api: openai-completions
-    # LiteLLM runs with no master key.
+    # LiteLLM runs with no master key; the SGLang key is LiteLLM's concern, not the agent's.
     auth: none
     compat:
       supportsDeveloperRole: false
-      # LiteLLM rejects OpenAI's `store` param for Ollama-backed models.
+      # LiteLLM rejects OpenAI's `store` param for some backends; nothing here uses it.
       supportsStore: false
     models:
-      - id: local-qwen
-        name: Qwen3-Coder-Next Q8 (dgx1 ollama via litellm)
-        # qwen3-coder-next has no thinking mode.
-        reasoning: false
+      - id: qwen3.8-27b
+        name: Qwen3.8 27B NVFP4 + DFlash2 (dgx1 sglang via litellm)
+        # SGLang runs with --reasoning-parser qwen3; LiteLLM returns the thinking as
+        # reasoning_content.
+        reasoning: true
         input: [text]
-        # The window Ollama serves for this model (from /api/ps on dgx1).
+        # SGLang allows 1,010,000 tokens (YaRN); 262144 is the model's native window and far
+        # more than any factory step needs.
         contextWindow: 262144
         maxTokens: 32000
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }

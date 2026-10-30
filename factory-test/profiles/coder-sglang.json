@@ -1,0 +1,8 @@
+{
+  "//": "Coder stages with CODER_BACKEND=sglang: omp + qwen3.8-27b straight to the qwen38 SGLang proxy on dgx1, bypassing LiteLLM. Writable workspace. Egress only to that proxy, by FQDN: no module downloads, so the stdlib-only constraint is enforced, not just requested.",
+  "image": "ghcr.io/gherlein/agentdev:latest",
+  "workspace": { "source": "./work", "mount": "work", "mode": "rw", "ssh": false, "usb": false },
+  "network": { "mode": "allowlist", "allow": ["dgx1.herlein.me:30001"], "log": true },
+  "mounts": { "agent_folder": "./homes/coder" },
+  "one-shot": { "agent": "omp" }
+}
