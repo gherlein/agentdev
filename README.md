@@ -20,6 +20,59 @@ configs for the common setups.
 agentdev is **self-contained**: it ships its own container image, entrypoint, and mount
 library, and depends on nothing but `podman` and `python3`.
 
+## How an agent home works
+
+An agent looks for its config in fixed places in its home: `~/.claude`, `~/.pi`, `~/.omp`. To
+give it a different config, agentdev does not change the agent; it changes what is *at* those
+places inside the container. You can keep as many configs (profiles) on the host as you like,
+and each run sees one of them as if it were your normal setup.
+
+```mermaid
+flowchart LR
+  subgraph host[Host]
+    P1[profiles/review/<br/>.claude/ + .claude.json]
+    P2[profiles/local-coder/<br/>.omp/agent/models.yml ...]
+  end
+  subgraph c1[Container A]
+    H1[/home/developer/.claude<br/>/home/developer/.claude.json/]
+  end
+  subgraph c2[Container B]
+    H2[/home/developer/.omp/]
+  end
+  P1 -->|bind mount, rw| H1
+  P2 -->|bind mount, rw| H2
+```
+
+What makes that work:
+
+1. **A profile folder on the host, laid out like a home.** `mounts.agent_folder` is a folder
+   holding the agent's dotfiles exactly as they would sit in `~`. Keep one per profile.
+2. **A list of what each agent keeps in its home.** agentdev has one small table
+   (`lib/agents.sh`): claude keeps `.claude/` and `.claude.json`; pi keeps `.pi/`; omp keeps
+   `.omp/`.
+3. **Bind mounts onto the container's home.** Each of those items is mounted read-write from the
+   profile folder at the same spot under the container user's home, `/home/developer`. The agent
+   starts, looks in `~/.claude`, and finds that profile's files. Whatever it saves (settings,
+   sessions, memory) lands back in the host folder, so the profile persists between runs.
+4. **The same user on both sides.** The container runs with `--userns=keep-id`, so the container
+   user *is* your host user: files the agent writes stay owned by you, and it can read what you
+   put there (see [Why podman](#why-podman-and-why-rootless)).
+5. **Absolute paths still resolve.** Configs often hold absolute host paths (a hook at
+   `/home/you/.claude/hooks/x.sh`, a plugin's install path). The entrypoint symlinks your host
+   home path to `/home/developer`, so those paths land on the mounted profile.
+6. **A few fix-ups an agent would otherwise trip over:**
+   - **Missing pieces are created.** A new profile folder gets empty dirs, and claude's
+     `.claude.json` is seeded as `{}`, because claude aborts a headless run on an empty file.
+   - **Secrets never live in the profile.** The Claude login is a per-run copy of your host login
+     ([`host_login`](#host_login--reuse-your-host-claude-login)), deleted at exit; API keys and
+     model routing come from a `.env`/`.envrc` in the workspace.
+   - **Optional overlays.** `mounts.history` and `mounts.memory` mount the session-history or
+     memory subfolder from a separate host folder on top of the home.
+
+In short: the folders hold the files, a small table says where each agent expects them, and bind
+mounts put them there, with the same user ID and a home-path symlink so everything inside looks
+exactly like your normal setup.
+
 ## Prerequisites
 
 - **Linux** with **rootless [podman](https://podman.io)** — the reason it must be podman is below.
