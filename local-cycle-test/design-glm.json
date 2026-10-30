@@ -1,8 +1,0 @@
-{
-  "//": "Design + review on a LOCAL model with the omp agent: glm-4.5-air (Ollama on dgx2) through LiteLLM on dgx1. One-shot. The model routing lives in the omp home (omp-seed/glm, copied fresh into homes/glm by orchestrate.sh before each step). Egress only to LiteLLM, by its fully qualified name. The orchestrator passes the real task with --prompt; prompts/design.md is the default.",
-  "image": "ghcr.io/gherlein/agentdev:latest",
-  "workspace": { "source": "./project", "mount": "work", "mode": "rw", "ssh": false, "usb": false },
-  "network": { "mode": "allowlist", "allow": ["dgx1.herlein.me:4000"], "log": true },
-  "mounts": { "agent_folder": "./homes/glm" },
-  "one-shot": { "agent": "omp", "prompt": "prompts/design.md" }
-}
