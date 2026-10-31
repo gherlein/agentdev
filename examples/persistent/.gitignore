@@ -1,0 +1,12 @@
+# The demo workspace: put a project here, or point workspace.source at yours.
+work/*
+!work/.gitkeep
+# Each run's transcripts and memory (mounts.history, mounts.memory).
+history/
+memory/
+# The profile's seed files are kept; everything the agent writes into its home is run data.
+home/*
+!home/.claude/
+home/.claude/*
+!home/.claude/CLAUDE.md
+!home/.claude/settings.json

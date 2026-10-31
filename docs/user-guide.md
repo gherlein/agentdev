@@ -173,8 +173,8 @@ model environment best-effort for now.
 - `templates/<agent>/` — copy-by-hand starter kits (`agentdev-config.json` + the agent's
   instruction file + `env.example`). `cp -r templates/claude ./agentdev` and edit.
 - `examples/minimal` — the smallest interactive config.
-- `examples/isolated` — a locked-down headless run.
-- `examples/persistent` — a kept home with split history/memory.
+- `examples/isolated` — a locked-down headless run, as one profile folder (config + `home/`).
+- `examples/persistent` — a kept home with split history/memory, as one profile folder.
 - `examples/one-shot-orchestrator` — fan many prompts across parallel one-shot runs.
 
 ## 11. Troubleshooting
