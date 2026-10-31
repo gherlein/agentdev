@@ -1,10 +1,10 @@
 {
   "image": "ghcr.io/gherlein/agentdev:latest",
   "workspace": {
-    "source": ".", "mount": "work", "mode": "ro", "ssh": false, "usb": false,
+    "source": "./work", "mount": "work", "mode": "ro", "ssh": false, "usb": false,
     "files": [ { "source": "./secret.env", "name": ".env" } ]
   },
   "network": { "mode": "allowlist", "allow": ["api.anthropic.com"], "log": true },
-  "mounts": { "agent_folder": "./.agent-home" },
+  "mounts": { "agent_folder": "./home" },
   "one-shot": { "agent": "claude", "model": "claude-opus-5-5", "prompt": "task.md" }
 }

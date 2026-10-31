@@ -73,6 +73,21 @@ In short: the folders hold the files, a small table says where each agent expect
 mounts put them there, with the same user ID and a home-path symlink so everything inside looks
 exactly like your normal setup.
 
+**Keep a profile in one folder.** Every relative path in a config resolves from the config file's
+folder, so a profile can carry its own home next to its config and be copied anywhere:
+
+```text
+review/
+├── agentdev-config.json     "workspace": { "source": "~/src/my-project" }, "mounts": { "agent_folder": "./home" }
+└── home/
+    └── .claude/CLAUDE.md, settings.json, skills/ ...
+```
+
+`agentdev -c review/agentdev-config.json` runs it. A profile's own content is a few KB, so keeping
+one folder per profile duplicates almost nothing; share skills with the `skills` key or `sm` in
+copy mode (a symlink to a store outside the home does not resolve inside the container). See
+[`examples/isolated`](./examples/isolated) and [`examples/persistent`](./examples/persistent).
+
 ## Prerequisites
 
 - **Linux** with **rootless [podman](https://podman.io)** — the reason it must be podman is below.
@@ -371,7 +386,7 @@ Copy-by-hand starting points, one folder per supported agent:
 
 ```
 templates/
-├── claude/   # agentdev-config.json, CLAUDE.md, settings.json, env.example
+├── claude/   # agentdev-config.json, CLAUDE.md, env.example
 ├── omp/      # agentdev-config.json, AGENTS.md, env.example
 └── pi/       # agentdev-config.json, AGENTS.md, env.example
 ```
