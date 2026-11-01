@@ -151,9 +151,17 @@ does not carry your host's DNS `search` domain, so a short name fails, and the a
 empty reply. The allowlist also matches names as strings, so `dgx1` and `dgx1.example.lan` are
 different entries.
 
+In `allowlist` mode, and in `none` mode with `log: true`, the agent joins the network namespace of
+a **sink** sidecar. The sink answers every DNS lookup itself (no name reaches a real resolver),
+refuses every attempt that goes around the proxy at once, and logs both. Plain `none` without
+`log` stays `--network none`.
+
 The egress log (`network.log`) is written into the agent home, so set `mounts.agent_folder` to keep
-it. For an untrusted task, combine `allowlist` with `workspace.mode: "ro"` and `workspace.ssh: false`
-(see [`examples/isolated`](../examples/isolated)).
+it. The proxy and the sink write to the same file: `CONNECT`/HTTP lines from the proxy, `DNS`,
+`TCP`, `UDP`, `ICMP` lines from the sink. [Network monitoring](network-monitoring.md) explains the
+format, how to tell an agent program's own traffic from the model's, and the settings that quiet
+Claude Code and omp. For an untrusted task, combine `allowlist` with `workspace.mode: "ro"` and
+`workspace.ssh: false` (see [`examples/isolated`](../examples/isolated)).
 
 ## 9. Supported agents
 

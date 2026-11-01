@@ -28,11 +28,12 @@ agentdev (this repo)
 │   ├── jsoncfg.py            ← the strict schema + reader (get | list | rows | has | check | validate)
 │   ├── agents.sh             ← the per-agent table (exec, home dirs, history/memory, model env, headless cmd)
 │   ├── mounts.sh             ← build the podman mount plan (workspace, files, home, redirects, folders, tty)
-│   └── net.sh                ← network modes + the egress proxy sidecar
+│   └── net.sh                ← network modes + the egress proxy and network sink sidecars
 ├── image/
 │   ├── Containerfile         ← builds ghcr.io/gherlein/agentdev (hardened, non-root; claude/omp/pi + herdr)
 │   ├── entrypoint.sh         ← UID/GID remap, host-home symlink, CA rebuild, gosu exec
-│   └── proxy.py              ← egress allowlist proxy, run as a sidecar from this image
+│   ├── proxy.py              ← egress allowlist proxy, run as a sidecar from this image
+│   └── sink.py               ← network sink: owns the agent's network namespace, refuses DNS, logs bypass attempts
 ├── templates/<agent>/        ← copy-by-hand starter kits (claude, omp, pi)
 ├── examples/                 ← worked config scenarios + the one-shot orchestrator
 └── tests/                    ← offline smoke + matrix, live tiers, proxy unit tests
@@ -118,7 +119,7 @@ agentdev [--dry-run] [-c <config>] [--prompt <file>] [-- command...]
   ├─ collect_mounts: workspace; workspace.files (ro); agent home from agent_folder; history/memory redirects;
   │                  read_only/read_write {src,dest}; tty_devices
   ├─ collect_ssh_mount (workspace.ssh); model env (one-shot + agent model env); userns; workspace.usb
-  ├─ setup_network (off | none | allowlist + proxy; egress log into the agent home)
+  ├─ setup_network (off | none [+ sink if log] | allowlist + proxy + sink; egress log into the agent home)
   ├─ assemble podman argv (net, userns, usb, devices, workspace, home, ssh, volumes, prompt, model, HOST_* env, -w /<mount>)
   │     --dry-run prints the settled plan + full podman command and EXITS here (no side effects)
   └─ podman run ... IMAGE  (bash by default, or the headless one-shot command)
@@ -164,13 +165,20 @@ Source directories/files that are missing, not of the right type, or unreadable 
 `.env`) before invoking the agent. A secret file that should stay out of the repo is injected via
 `workspace.files`.
 
-**Network** (`lib/net.sh`): `off` (host networking) · `none` (`--network none`) · `allowlist` (the
-agent joins an `--internal` podman network; a proxy sidecar from the same image bridges it to a normal
-network; `HTTP(S)_PROXY` points the agent at the proxy, so a client ignoring the proxy reaches
-nothing). `network.log` writes `<agent_folder>/agentdev-egress.log` (ephemeral if no `agent_folder`);
+**Network** (`lib/net.sh`): `off` (host networking) · `none` (`--network none`; with `network.log`,
+the agent joins a sink that has no network, so attempts are logged) · `allowlist` (a proxy sidecar from
+the same image sits on an `--internal --disable-dns` podman network and a normal one; a **sink**
+sidecar on the internal network owns the network namespace the agent joins with
+`--network container:<sink>`. The sink, which alone holds `NET_ADMIN`/`NET_RAW`, routes every outside
+address back to itself (`local default dev lo`), answers all DNS with NXDOMAIN, and logs every new
+flow except the one to the proxy. `HTTP(S)_PROXY` points the agent at the proxy, whose address is in
+the agent's mounted `/etc/hosts`, so a client ignoring the proxy is refused at once and logged.
+Before the sink, podman's network DNS forwarded any name to the host's resolver; see
+`docs/network-monitoring.md`). `network.log` writes `<agent_folder>/agentdev-egress.log`, shared by
+the proxy and the sink (ephemeral if no `agent_folder`);
 `network.mitm` adds per-URL filtering with a per-run CA. Because model routing lives in `.env`,
 agentdev does not derive the model endpoint — under `allowlist` you add the model host to
-`network.allow`. The proxy and networks are removed by the EXIT trap. Allowlist names must be fully
+`network.allow`. The sidecars and networks are removed by the EXIT trap. Allowlist names must be fully
 qualified: the sidecar's bridge-network DNS search list is `dns.podman`, not the host's `search`
 domain, so LAN short names (`dgx1`) do not resolve. This is deliberate. Inheriting the host search
 domain would silently widen what a short allowlist entry can reach.

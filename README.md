@@ -248,6 +248,14 @@ Every key is optional and takes a built-in default; omit a whole block to accept
   with optional egress `log` and per-URL `mitm`; add your model's host (e.g. `api.anthropic.com`)
   to `allow`.
 
+In `allowlist` mode, and in `none` mode with `log: true`, the agent shares the network namespace
+of a second sidecar, the **sink**. The sink answers every DNS lookup with "no such name" (so no
+name reaches a real resolver) and turns every attempt that bypasses the proxy (a direct IP, UDP,
+ICMP) into an immediate refusal. With `log: true`, every attempt is a line in the egress log:
+the proxy's decisions and the sink's `DNS`, `TCP`, `UDP` and `ICMP` lines in one file. See
+[`docs/network-monitoring.md`](./docs/network-monitoring.md), which also shows how to quiet the
+agents' own background traffic so the remaining lines stand out.
+
 **Use fully qualified host names in allowlist mode: no LAN shortcuts.** Write
 `dgx1.example.lan`, not `dgx1`. Use the same full name in `network.allow` and in whatever URL the
 agent calls (e.g. `ANTHROPIC_BASE_URL` in `.env`).
@@ -416,8 +424,12 @@ written into the agent home, so set `mounts.agent_folder` to keep it; then read 
 tools:
 
 ```bash
-cut -f2,4 <agent_folder>/agentdev-egress.log | sort | uniq -c | sort -rn
+cut -f2,3,4 <agent_folder>/agentdev-egress.log | sort | uniq -c | sort -rn
 ```
+
+Lines of kind `DNS`, `TCP`, `UDP` or `ICMP` are attempts that went around the proxy; see
+[`docs/network-monitoring.md`](./docs/network-monitoring.md) for how to tell an agent's own
+startup traffic from something the model asked for.
 
 For fanning prompts across many tasks in parallel, see
 [`examples/one-shot-orchestrator/`](./examples/one-shot-orchestrator/).
@@ -431,7 +443,7 @@ proven host-side that it cannot — run `make test-live-containment`; the method
 ```
 agentdev              launcher (bash)
 lib/                  config, agents, mounts, net (+ jsoncfg.py — the strict schema/reader)
-image/                Containerfile + entrypoint.sh + proxy.py (egress allowlist sidecar) -> ghcr.io/gherlein/agentdev
+image/                Containerfile + entrypoint.sh + proxy.py (egress allowlist sidecar) + sink.py (DNS and bypass sidecar) -> ghcr.io/gherlein/agentdev
 templates/<agent>/    per-agent starter kits (copy and edit)
 examples/             worked config scenarios and the one-shot orchestrator
 tests/                offline smoke + matrix, live tiers, proxy unit tests
@@ -472,7 +484,7 @@ escape, could not:
 - nest a container — an unprivileged nested run fails at user-namespace setup, and `/dev/fuse` is absent;
 - see the host's processes — the container has its own PID namespace;
 - reach a device not listed in `tty_devices`;
-- exfiltrate over the network — `network.mode: none` blocks all egress, and `allowlist` blocks any host you did not permit.
+- exfiltrate over the network — `network.mode: none` blocks all egress, and `allowlist` blocks any host you did not permit. Since 2026-11-01 that includes DNS: lookups are answered by agentdev's sink and never reach a real resolver (the containment tier above predates this; `make test-live` covers it).
 
 `network.mode: off` is host networking by design (egress open) and is **not** a containment
 boundary; locked-down runs use `none` or `allowlist`. The full method — the trust model, the

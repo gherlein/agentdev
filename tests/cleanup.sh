@@ -9,15 +9,18 @@
 #   PROXIES_BEFORE="$(agentdev_proxy_ids)"            # at test start
 #   remove_own_containers "$ROOT" "$PROXIES_BEFORE"   # in the EXIT trap
 
-# agentdev_proxy_ids -> the IDs of every agentdev proxy sidecar now present, sorted.
+# agentdev_proxy_ids -> the IDs of every agentdev sidecar (proxy or network sink) now present,
+# sorted.
 agentdev_proxy_ids() {
-  timeout 30 podman ps -a --filter label=agentdev.proxy -q 2>/dev/null | sort
+  { timeout 30 podman ps -a --filter label=agentdev.proxy -q 2>/dev/null
+    timeout 30 podman ps -a --filter label=agentdev.sink -q 2>/dev/null; } | sort -u
 }
 
 # remove_own_containers ROOT PROXIES_BEFORE
 #   Agent containers carry agentdev.home=<agent_folder>, and the tests keep every agent folder
-#   under ROOT, so they are matched by that prefix. Proxy sidecars carry no path, so only the
-#   ones that did not exist when the test started are removed.
+#   under ROOT, so they are matched by that prefix. Sidecars carry no path, so only the
+#   ones that did not exist when the test started are removed. A sink is removed only after
+#   the agent containers that joined its network namespace.
 remove_own_containers() {
   local root="$1" before="$2" id home
   while read -r id home; do

@@ -78,6 +78,11 @@ still must not be able to exfiltrate to a host that is not on the allowlist.
 | **Network `none` blocks egress** | Under `mode: none`, HTTPS and raw TCP both fail. |
 | **Network `allowlist` filters egress** | A non-listed host is blocked by the proxy sidecar; a listed host is reachable (control). |
 
+> **DNS (2026-11-01).** Until the network sink was added, a name looked up inside an `allowlist`
+> container was forwarded to the host's resolver, which this tier did not check. The sink now
+> answers every lookup itself and logs it; `make test-live` proves a unique name is refused and
+> recorded. See [network-monitoring.md](network-monitoring.md).
+
 > **Note on `network.mode: off`.** It is deliberately *not* tested as a boundary — `off` is
 > host/default networking, with egress open by design. The trust story uses `none` and
 > `allowlist`. Claiming `off` blocks egress would be a lie in the artifact.

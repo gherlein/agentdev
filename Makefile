@@ -7,7 +7,7 @@ PREFIX     ?= $(HOME)/.local
 BINDIR     := $(PREFIX)/bin
 
 SHELLS  := agentdev $(wildcard lib/*.sh) image/entrypoint.sh scripts/release.sh tests/smoke.sh tests/live.sh tests/live-agent.sh tests/live-containment.sh tests/cleanup.sh
-PYFILES := lib/jsoncfg.py image/proxy.py tests/matrix.py tests/test_proxy.py
+PYFILES := lib/jsoncfg.py image/proxy.py image/sink.py tests/matrix.py tests/test_proxy.py tests/test_sink.py
 
 .DEFAULT_GOAL := help
 
@@ -29,10 +29,11 @@ digest: ## Print IMAGE's pin-by-digest reference (set it as the default IMAGE)
 	@podman inspect --format '{{index .RepoDigests 0}}' $(IMAGE)
 
 .PHONY: test
-test: ## Run the offline suite: smoke + option-permutation matrix + proxy (docs/testing-plan.md)
+test: ## Run the offline suite: smoke + option-permutation matrix + proxy + sink (docs/testing-plan.md)
 	./tests/smoke.sh
 	python3 ./tests/matrix.py
 	python3 ./tests/test_proxy.py
+	python3 ./tests/test_sink.py
 
 .PHONY: run-tests
 run-tests: test ## Alias for `test` (the default offline suite; CI entrypoint)

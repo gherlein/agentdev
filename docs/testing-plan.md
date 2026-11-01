@@ -55,6 +55,10 @@ no network, no real credentials, so it runs exhaustively in CI with no podman. W
     honored, the live credentials path never in the podman command, the token never printed, and
     the fail-closed negatives: missing login, non-claude agent).
 
+- **`tests/test_sink.py`** — the network sink (`image/sink.py`): DNS query parsing and the
+  NXDOMAIN reply, which captured frames count as attempts (TCP SYN, UDP, ICMP echo; not replies,
+  loopback, multicast, neighbour discovery or the proxy connection), and the log line format.
+
 - **`tests/test_proxy.py`** — the egress proxy (`image/proxy.py`): allowlist rule parsing and
   matching (host, wildcard, port, path prefix), plus a socket-level keep-alive test. A client
   sends two plain-HTTP requests on one proxied connection to a fake keep-alive upstream, and the
@@ -93,6 +97,10 @@ the `adev` helper). Checks:
 - **egress log** → with `network.log: true`, a denied CONNECT is recorded in
   `<agent_folder>/agentdev-egress.log`. The proxy sidecar runs as the host user (keep-id), so it
   can write there. This needs no internet: the denial is logged before any upstream connect.
+- **network sink** → in `allowlist` and in `none` + `log`: a lookup of a unique name fails and the
+  name is in the egress log; a direct TCP connection to `1.2.3.4:443` is refused within a second
+  and logged; a UDP datagram is logged; the agent, as root via `sudo`, cannot change the sink's
+  routes; the proxy is still reachable; no sink is left after the runs. Needs no internet.
 - **network none** → `curl` fails; **allowlist** → a denied host is blocked (and an allowed host
   reachable where the environment has upstream egress).
 - **scoped cleanup** → the test's teardown removes its own leftover containers, and leaves the
@@ -103,7 +111,7 @@ tier calls `remove_own_containers` from `tests/cleanup.sh`. It removes only what
 started:
 
 - agent containers whose `agentdev.home` label is under the test's `$ROOT`;
-- proxy sidecars that did not exist when the test began.
+- proxy and sink sidecars that did not exist when the test began.
 
 It never touches the operator's own agentdev sessions.
 

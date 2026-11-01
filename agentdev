@@ -279,8 +279,10 @@ launch() {
       echo "credentials:   from .env/.envrc in the workspace"
     fi
     if [[ "$NET_MODE" == allowlist ]]; then
-      echo "network:       allowlist (${#NET_ALLOW[@]} rule(s), log=$NET_LOG, mitm=$NET_MITM) via proxy sidecar"
+      echo "network:       allowlist (${#NET_ALLOW[@]} rule(s), log=$NET_LOG, mitm=$NET_MITM) via proxy sidecar and sink (DNS refused; attempts past the proxy logged)"
       printf '  allow:       %s\n' "${NET_ALLOW[@]}"
+    elif [[ "$NET_MODE" == none && "$NET_LOG" == true ]]; then
+      echo "network:       none (sink: every attempt logged to the egress log)"
     else
       echo "network:       $NET_MODE"
     fi
