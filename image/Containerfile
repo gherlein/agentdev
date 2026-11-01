@@ -187,5 +187,9 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 # it is version-locked to the image digest and needs no host-side copy).
 COPY proxy.py /usr/local/bin/agentdev-proxy.py
 RUN chmod +x /usr/local/bin/agentdev-proxy.py
+# The network sink (lib/net.sh runs it in a second sidecar whose network namespace the agent
+# joins): routes every outside address back, logs each attempt, refuses all DNS.
+COPY sink.py /usr/local/bin/agentdev-sink.py
+RUN chmod +x /usr/local/bin/agentdev-sink.py
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["bash"]

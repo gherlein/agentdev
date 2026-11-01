@@ -187,15 +187,35 @@ def main():
         positive("off", dict(base), root, home, [
             ("network off", lambda o: "network:       off" in o),
             ("no proxy", lambda o: "HTTPS_PROXY" not in o),
+            ("no sink", lambda o: "container:agentdev-sink-" not in podman_line(o)),
         ])
         positive("none", {**base, "network": {"mode": "none"}}, root, home, [
             ("--network none", lambda o: "--network none" in podman_line(o)),
+            ("no sink without log", lambda o: "agentdev-sink-" not in podman_line(o)),
+        ])
+        positive("none + log", {**base, "network": {"mode": "none", "log": True}}, root, home, [
+            ("joins the sink's namespace", lambda o: "--network container:agentdev-sink-" in podman_line(o)),
+            ("not --network none", lambda o: "--network none" not in podman_line(o)),
+            ("resolv.conf points at the sink", lambda o: "/etc/resolv.conf:ro" in podman_line(o)),
+            ("hosts file names the agent's host", lambda o: "/etc/hosts:ro" in podman_line(o)
+                                                        and "--hostname agentdev" in podman_line(o)),
+            ("no proxy", lambda o: "HTTPS_PROXY" not in podman_line(o)),
+            ("plan names the sink", lambda o: "network:       none (sink: every attempt logged" in o),
         ])
         positive("allowlist", {**base, "network": {"mode": "allowlist", "allow": ["api.anthropic.com"], "log": True}},
                  root, home, [
             ("proxy env", lambda o: "HTTPS_PROXY=http://agentdev-proxy-" in podman_line(o)),
-            ("internal net", lambda o: "--network agentdev-int-" in podman_line(o)),
+            ("joins the sink's namespace", lambda o: "--network container:agentdev-sink-" in podman_line(o)),
+            ("not on the internal net directly", lambda o: "--network agentdev-int-" not in podman_line(o)),
+            ("resolv.conf points at the sink", lambda o: "/etc/resolv.conf:ro" in podman_line(o)),
+            ("hosts names the proxy", lambda o: "/etc/hosts:ro" in podman_line(o)),
+            ("fixed hostname", lambda o: "--hostname agentdev" in podman_line(o)),
             ("allow printed", lambda o: "api.anthropic.com" in o),
+            ("plan names the sink", lambda o: "via proxy sidecar and sink" in o),
+        ])
+        positive("allowlist, no log", {**base, "network": {"mode": "allowlist", "allow": ["api.anthropic.com"]}},
+                 root, home, [
+            ("the sink still closes DNS", lambda o: "--network container:agentdev-sink-" in podman_line(o)),
         ])
 
         print("G5  negatives (fail closed)")
